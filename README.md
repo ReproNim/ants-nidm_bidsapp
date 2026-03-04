@@ -25,7 +25,7 @@ Pre-built images will be available once the app is published to Docker Hub. For 
 ### From Source
 
 ```bash
-git clone https://github.com/ReproNim/ants-nidm_bidsapp.git
+git clone --recursive git@github.com:ReproNim/ants-nidm_bidsapp.git
 cd ants-nidm_bidsapp
 pip install -e .
 ```
@@ -139,6 +139,31 @@ ants-nidm bids_dir output_dir participant \
 
 The app generates the following output structure:
 
+```mermaid
+graph TD
+    A[output_dir/] --> B[ants-nidm_bidsapp/]
+    A --> C[logs/]
+    B --> D[ants-seg/]
+    B --> E[nidm/]
+    D --> D1[dataset_description.json]
+    D --> D2[sub-XX/]
+    D2 --> D3[ses-YY/\nmulti-session]
+    D2 --> D4[anat/ & stats/\nsingle-session]
+    D3 --> D5[anat/]
+    D3 --> D6[stats/]
+    D5 --> D5a[sub-XX_ses-YY_T1w_space-orig_dseg.nii.gz]
+    D5 --> D5b[sub-XX_ses-YY_T1w_BrainSegmentation.nii.gz]
+    D5 --> D5c[sub-XX_ses-YY_T1w_BrainSegmentationPosteriors*.nii.gz]
+    D6 --> D6a[sub-XX_ses-YY_antslabelstats.csv]
+    D6 --> D6b[sub-XX_ses-YY_antsbrainvols.csv]
+    E --> E1[dataset_description.json]
+    E --> E2[sub-01_ses-baseline.ttl]
+    E --> E3[sub-02_ses-baseline.ttl]
+```
+
+<details>
+<summary>Plain-text tree view</summary>
+
 ```
 output_dir/
 ├── ants-nidm_bidsapp/                          # Main BIDS App output directory
@@ -161,7 +186,9 @@ output_dir/
 └── logs/                                       # Processing logs
 ```
 
-**Note:** NIDM outputs use a **flat file structure** (all TTL files in one directory) rather than hierarchical subdirectories. This design choice simplifies file management and discovery. See CLAUDE.md for detailed rationale.
+</details>
+
+**Note:** NIDM outputs use a **flat file structure** (all TTL files in one directory) rather than hierarchical subdirectories, which simplifies file management and discovery.
 
 Output files include:
 - **Segmentation results** in BIDS-derivatives format
@@ -176,6 +203,21 @@ The app generates NIDM-compatible outputs that can be used with NIDM tools for v
 - Segmentation statistics
 - Brain volumes
 - Tissue volumes
+
+The NIDM output files follow a **flat file structure** inside `output_dir/ants-nidm_bidsapp/nidm/`:
+
+```mermaid
+graph TD
+    N[nidm/] --> N1[dataset_description.json]
+    N --> N2[sub-01.ttl\nsingle-session]
+    N --> N3[sub-01_ses-baseline.ttl\nmulti-session]
+    N --> N4[sub-02_ses-followup.ttl\nmulti-session]
+    N2 -. NIDM/RDF .-> R[PyNIDM / NIDM tools]
+    N3 -. NIDM/RDF .-> R
+    N4 -. NIDM/RDF .-> R
+```
+
+Each `.ttl` file encodes the subject's brain segmentation statistics in [NIDM](http://nidm.nidash.org/) format, enabling interoperability with tools such as [PyNIDM](https://github.com/incf-nidash/PyNIDM).
 
 ## Contributing
 
