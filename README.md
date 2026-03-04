@@ -169,6 +169,26 @@ Output files include:
 - **Statistics files** (CSV) for downstream analysis
 - **NIDM-compatible outputs** (Turtle RDF format) for reproducibility and data sharing
 
+## NIDM Outputs
+
+The app generates NIDM-compatible outputs that can be used with NIDM tools for visualization and sharing of results. The NIDM outputs include:
+
+- Segmentation statistics
+- Brain volumes
+- Tissue volumes
+
+The NIDM output files follow a **flat file structure** inside `output_dir/ants-nidm_bidsapp/nidm/`:
+
+```
+nidm/
+├── dataset_description.json        # BIDS-compliant dataset description
+├── sub-01.ttl                      # Single-session subject (Turtle/RDF)
+├── sub-01_ses-baseline.ttl         # Multi-session subject
+└── sub-02_ses-followup.ttl
+```
+
+Each `.ttl` file encodes the subject's brain segmentation statistics in [NIDM](http://nidm.nidash.org/) format, enabling interoperability with tools such as [PyNIDM](https://github.com/incf-nidash/PyNIDM).
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
