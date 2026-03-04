@@ -25,7 +25,7 @@ Pre-built images will be available once the app is published to Docker Hub. For 
 ### From Source
 
 ```bash
-git clone --recurse-submodules git@github.com:ReproNim/ants-nidm_bidsapp.git
+git clone --recursive git@github.com:ReproNim/ants-nidm_bidsapp.git
 cd ants-nidm_bidsapp
 pip install -e .
 ```
