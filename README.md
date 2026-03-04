@@ -25,7 +25,7 @@ Pre-built images will be available once the app is published to Docker Hub. For 
 ### From Source
 
 ```bash
-git clone https://github.com/ReproNim/ants-nidm_bidsapp.git
+git clone --recurse-submodules git@github.com:ReproNim/ants-nidm_bidsapp.git
 cd ants-nidm_bidsapp
 pip install -e .
 ```
@@ -161,21 +161,13 @@ output_dir/
 └── logs/                                       # Processing logs
 ```
 
-**Note:** NIDM outputs use a **flat file structure** (all TTL files in one directory) rather than hierarchical subdirectories. This design choice simplifies file management and discovery. See CLAUDE.md for detailed rationale.
+**Note:** NIDM outputs use a **flat file structure** (all TTL files in one directory) rather than hierarchical subdirectories, which simplifies file management and discovery.
 
 Output files include:
 - **Segmentation results** in BIDS-derivatives format
 - **Probability maps** for each tissue class
 - **Statistics files** (CSV) for downstream analysis
 - **NIDM-compatible outputs** (Turtle RDF format) for reproducibility and data sharing
-
-## NIDM Outputs
-
-The app generates NIDM-compatible outputs that can be used with NIDM tools for visualization and sharing of results. The NIDM outputs include:
-
-- Segmentation statistics
-- Brain volumes
-- Tissue volumes
 
 ## Contributing
 
