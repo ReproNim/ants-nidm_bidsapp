@@ -87,6 +87,10 @@ From: ubuntu:22.04
     echo "Labels directory contents:"
     ls -la /opt/data/OASIS-TRT-20_DKT31_CMA_labels_v2/ | head -5
 
+    # Make atlas/template files world-readable so non-root users can open them
+    echo "Setting world-readable permissions for /opt/data"
+    chmod -R a+r /opt/data || true
+
     # Install Python dependencies and application code
     cd /opt
     python3 -m pip install -r requirements.txt
