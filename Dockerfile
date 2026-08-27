@@ -37,19 +37,48 @@ RUN mkdir -p /opt/data && chmod 755 /opt/data
 # Download OASIS templates and atlases
 WORKDIR /opt/data
 
-# Download OASIS-30 Atropos template
-RUN wget -q https://files.osf.io/v1/resources/ej52r/providers/osfstorage/5e8251d20f59a8001ae648c3/?zip= \
+# Download the OASIS templates and atlases.
+#
+# These URLs mirror Singularity exactly and must stay in sync with it. The two
+# recipes had drifted apart: this file pointed at OSF resource ej52r, which now
+# returns HTTP 500, so `docker build` failed at this step -- and it never
+# downloaded the jointfusion labels at all, so even a successful build produced
+# an image where --method quick aborts with "Template labels not found". The
+# Singularity URLs below are the ones that actually resolve.
+
+# OASIS-30 Atropos template (preprocessing + Atropos priors)
+RUN wget -q "https://osf.io/rh9km/?action=download&version=1" \
     -O OASIS-30_Atropos_template.zip && \
-    unzip -q OASIS-30_Atropos_template.zip && \
+    unzip -q -o OASIS-30_Atropos_template.zip && \
     rm OASIS-30_Atropos_template.zip && \
     chmod -R 755 /opt/data/OASIS-30_Atropos_template
 
-# Download OASIS-TRT-20 atlases for joint label fusion
-RUN wget -q https://files.osf.io/v1/resources/ej52r/providers/osfstorage/5e825d0f2301130197e6a15e/?zip= \
-    -O OASIS-TRT-20.zip && \
-    unzip -q OASIS-TRT-20.zip && \
-    rm OASIS-TRT-20.zip && \
-    chmod -R 755 /opt/data/OASIS-TRT-20_*
+# OASIS-TRT-20 atlas brains for joint label fusion
+RUN wget -q "https://files.osf.io/v1/resources/hs8am/providers/osfstorage/57c1a8f06c613b01f98d68a9/?zip=" \
+    -O OASIS-TRT-20_brains.zip && \
+    unzip -q -o OASIS-TRT-20_brains.zip -d OASIS-TRT-20_brains && \
+    rm OASIS-TRT-20_brains.zip
+
+# Matching DKT31/CMA labels for those atlases
+RUN wget -q "https://files.osf.io/v1/resources/hs8am/providers/osfstorage/57c1a8ffb83f690201c4a8be/?zip=" \
+    -O OASIS-TRT-20_DKT31_CMA_labels_v2.zip && \
+    unzip -q -o OASIS-TRT-20_DKT31_CMA_labels_v2.zip -d OASIS-TRT-20_DKT31_CMA_labels_v2 && \
+    rm OASIS-TRT-20_DKT31_CMA_labels_v2.zip
+
+# Pre-computed jointfusion labels in OASIS-30 space, required by --method quick
+RUN wget -q "https://osf.io/download/nxg5t/" \
+    -O OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_OASIS-30_v2.nii.gz
+
+# Both atlas archives may unpack with a redundant nesting level; flatten it so
+# the wrapper's expected paths resolve (same fix-up Singularity performs).
+RUN for d in OASIS-TRT-20_brains OASIS-TRT-20_DKT31_CMA_labels_v2; do \
+        if [ -d "$d/$d" ]; then \
+            echo "Flattening nested $d"; \
+            mv "$d/$d"/* "$d"/ && rmdir "$d/$d"; \
+        fi; \
+    done && \
+    chmod -R 755 /opt/data && \
+    ls -la /opt/data
 
 # Create app directory with proper permissions
 RUN mkdir -p /app && chmod 755 /app
