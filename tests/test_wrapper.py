@@ -133,9 +133,12 @@ class TestANTsSegmentation(unittest.TestCase):
         mock_prob3.numpy.return_value = np.array([0.1, 0.1, 0.1, 0.8, 0.8, 0.8])
         mock_prob3.spacing = [1.0, 1.0, 1.0]
 
+        # 'fusion' returns one posterior per anatomical label, plus the label
+        # numbers those posteriors belong to.
         segmentation_results = {
             'segmentation': mock_seg,
-            'probabilityimages': [mock_prob1, mock_prob2, mock_prob3]
+            'probabilityimages': [mock_prob1, mock_prob2, mock_prob3],
+            'segmentation_numbers': [1, 2, 24],
         }
 
         with patch('src.antspy.wrapper.ants.image_write') as mock_write:
@@ -167,21 +170,79 @@ class TestANTsSegmentation(unittest.TestCase):
                 self.assertEqual(volumes["1"], 2)
                 self.assertEqual(volumes["2"], 3)
 
-            # Verify brainvols.csv content
+            # Verify brainvols.csv content. BVOL only: CSFVOL/GMVOL/WMVOL used to
+            # be derived from probabilityimages[0..2] as if they were CSF/GM/WM
+            # tissue posteriors, but under 'fusion' those are per-label
+            # posteriors and under 'quick' they do not exist -- so the columns
+            # were wrong in every path that produced them.
             with open(brainvols_file, newline='') as f:
                 reader = csv.DictReader(f)
-                fieldnames = reader.fieldnames or []
-                self.assertTrue({"BVOL", "CSFVOL", "GMVOL", "WMVOL"}.issubset(set(fieldnames)))
+                fieldnames = set(reader.fieldnames or [])
+                self.assertEqual(fieldnames, {"BVOL"})
+                self.assertFalse(fieldnames & {"CSFVOL", "GMVOL", "WMVOL"},
+                                 "tissue volumes must not be faked from label posteriors")
                 rows = list(reader)
                 self.assertEqual(len(rows), 1)
-                row = rows[0]
-                self.assertIn("BVOL", row)
-                self.assertIn("CSFVOL", row)
-                self.assertIn("GMVOL", row)
-                self.assertIn("WMVOL", row)
 
             # Check that image_write was called for all images
             self.assertEqual(mock_write.call_count, 4)  # 1 segmentation + 3 probability maps
+
+            # Probability maps are named by anatomical label, not list position
+            written = [str(call.args[1]) for call in mock_write.call_args_list]
+            for label_id in (1, 2, 24):
+                self.assertTrue(
+                    any(f"label-{label_id}_probseg" in w for w in written),
+                    f"no probseg written for label {label_id}: {written}")
+
+    def test_cortical_thickness_uses_invtransforms_for_template_to_subject(self):
+        """The extraction mask must come template -> subject, i.e. invtransforms.
+
+        Regression test. compute_cortical_thickness registers subject -> template
+        (fixed=brain_template, moving=brain_image), so fwdtransforms maps
+        subject -> template. Pulling the template-space extraction mask into
+        subject space with fwdtransforms produced a mask covering the whole FOV,
+        so joint label fusion labelled air, skull and neck -- 100% of voxels
+        labelled, no background, and an 11.5 L brain volume on ABIDE sub-0051456.
+        """
+        FWD = ["/fake/subj_to_tmpl_1Warp.nii.gz", "/fake/subj_to_tmpl_0GenericAffine.mat"]
+        INV = ["/fake/subj_to_tmpl_0GenericAffine.mat", "/fake/subj_to_tmpl_1InverseWarp.nii.gz"]
+
+        def fake_registration(*args, **kwargs):
+            return {
+                "fwdtransforms": list(FWD),
+                "invtransforms": list(INV),
+                "warpedmovout": mock_image_read(),
+            }
+
+        applied = []
+
+        def fake_apply_transforms(*args, **kwargs):
+            applied.append(kwargs)
+            return mock_image_read()
+
+        # Patch the name the module under test resolves, not this file's mock
+        # object: tests/test_run.py also assigns sys.modules['ants'], so which
+        # mock src.antspy.wrapper.ants points at depends on import order.
+        with patch('src.antspy.wrapper.ants.registration', side_effect=fake_registration), \
+             patch('src.antspy.wrapper.ants.apply_transforms', side_effect=fake_apply_transforms), \
+             patch('src.antspy.wrapper.ants.threshold_image', side_effect=lambda *a, **k: mock_image_read()), \
+             patch('src.antspy.wrapper.ants.iMath', side_effect=lambda img, *a, **k: img):
+            results = self.segmenter.compute_cortical_thickness(mock_image_read())
+
+        # Last apply_transforms call is the extraction mask -> subject space
+        self.assertGreaterEqual(len(applied), 1)
+        mask_call = applied[-1]
+        self.assertEqual(
+            mask_call["transformlist"], INV,
+            "extraction mask must be warped with invtransforms (template -> subject)")
+        self.assertNotEqual(
+            mask_call["transformlist"], FWD,
+            "using fwdtransforms warps the mask the wrong way and yields a full-FOV mask")
+        # whichtoinvert must stay unset so ANTsPy infers (True, False) itself
+        self.assertIsNone(mask_call.get("whichtoinvert"))
+
+        # The stored template->subject transforms are the same ordered list
+        self.assertEqual(results["TemplateToSubjectTransforms"], INV)
 
     def test_organize_bids_output_with_session(self):
         """Test organizing outputs in BIDS format with session"""

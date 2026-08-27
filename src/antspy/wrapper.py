@@ -356,28 +356,19 @@ class ANTsSegmentation:
                 
             template_labels = ants.image_read(str(self.template_labels_path))
             
-            # Apply template-to-subject transforms to labels
-            # Build transform list based on what's available
-            transformlist = []
-            whichtoinvert = []
-            
-            if thickness_results.get('TemplateToSubject1GenericAffine'):
-                transformlist.append(thickness_results['TemplateToSubject1GenericAffine'])
-                whichtoinvert.append(False)
-                
-            if thickness_results.get('TemplateToSubject0Warp'):
-                transformlist.append(thickness_results['TemplateToSubject0Warp'])
-                whichtoinvert.append(False)
-                
+            # Apply template-to-subject transforms to the label atlas. As above,
+            # whichtoinvert is left unset so ANTsPy infers it from the transform
+            # shapes; the previous code hardcoded False for every element, which
+            # is wrong for the affine in an invtransforms list.
+            transformlist = thickness_results.get('TemplateToSubjectTransforms') or []
             if not transformlist:
                 raise ValueError("No transforms available for template-to-subject mapping")
-                
+
             warped_labels = ants.apply_transforms(
                 fixed=thickness_results['BrainSegmentationN4'],
                 moving=template_labels,
                 transformlist=transformlist,
-                interpolator='nearestNeighbor',
-                whichtoinvert=whichtoinvert
+                interpolator='nearestNeighbor'
             )
             
             return {
@@ -551,31 +542,46 @@ class ANTsSegmentation:
         label_df.to_csv(labelstats_file, index=False)
 
         # Generate antsbrainvols.csv
+        #
+        # Only BVOL is reported. This used to also emit CSFVOL/GMVOL/WMVOL from
+        # probabilityimages[0], [1] and [2], on the assumption that those are
+        # CSF/GM/WM tissue posteriors. They are not, in either method:
+        #   - 'fusion' returns one posterior per *anatomical label* (103 of them
+        #     on ABIDE sub-0051456), so [0..2] were simply the first three DKT
+        #     labels wearing tissue names -- delivered CSFVOL/GMVOL/WMVOL of
+        #     4105/5426/10391 mm^3 against ~1.5e5/6.0e5/5.0e5 expected.
+        #   - 'quick' returns no 'probabilityimages' key at all, so the branch
+        #     never ran there.
+        # That is every code path, so the columns were wrong whenever present.
+        # Deriving real tissue volumes means grouping DKT labels into tissue
+        # classes (or running Atropos for posteriors), which is a separate piece
+        # of work; reporting nothing beats reporting numbers off by ~100x.
         brain_vol_data = {"BVOL": brain_volume}
-        tissue_volumes = {}
-
-        probability_images = segmentation.get('probabilityimages') or []
-        if len(probability_images) >= 3:
-            csf_vol = float(np.sum(probability_images[0].numpy() > self.prob_threshold) * voxel_volume)
-            gm_vol = float(np.sum(probability_images[1].numpy() > self.prob_threshold) * voxel_volume)
-            wm_vol = float(np.sum(probability_images[2].numpy() > self.prob_threshold) * voxel_volume)
-
-            tissue_volumes = {
-                "CSFVOL": csf_vol,
-                "GMVOL": gm_vol,
-                "WMVOL": wm_vol,
-            }
-            brain_vol_data.update(tissue_volumes)
 
         brainvols_file = stats_dir / f"{seg_base}_antsbrainvols.csv"
         pd.DataFrame([brain_vol_data]).to_csv(brainvols_file, index=False)
 
-        # Save probability maps if available
-        if 'probabilityimages' in segmentation:
-            for idx, prob_img in enumerate(segmentation['probabilityimages']):
-                prob_filename = f"sub-{bids_subject}{session_part}_space-orig_label-{idx+1}_probseg.nii.gz"
-                prob_path = anat_dir / prob_filename
-                ants.image_write(prob_img, str(prob_path))
+        # Save probability maps if available.
+        # Name each map by the anatomical label it belongs to, taken from
+        # segmentation_numbers, rather than by its position in the list. The
+        # index-based names (label-1 ... label-104) did not correspond to any
+        # label in the segmentation, so the maps could not be matched to the
+        # structures they describe.
+        prob_images = segmentation.get('probabilityimages') or []
+        seg_numbers = segmentation.get('segmentation_numbers') or []
+        if prob_images and len(seg_numbers) != len(prob_images):
+            self.logger.warning(
+                f"{len(prob_images)} probability maps but {len(seg_numbers)} label "
+                "numbers; falling back to index-based probseg names"
+            )
+        for idx, prob_img in enumerate(prob_images):
+            if len(seg_numbers) == len(prob_images):
+                label_id = int(seg_numbers[idx])
+            else:
+                label_id = idx + 1
+            prob_filename = f"sub-{bids_subject}{session_part}_space-orig_label-{label_id}_probseg.nii.gz"
+            prob_path = anat_dir / prob_filename
+            ants.image_write(prob_img, str(prob_path))
         
         self.logger.info(f"Saved segmentation results for subject {bids_subject}")
         volume_info = {
@@ -585,9 +591,6 @@ class ANTsSegmentation:
             'segmentation': str(label_path),
             'label_volumes': {int(lbl): float(vol) for lbl, vol in zip(label_values, label_volumes_mm3)},
         }
-
-        if tissue_volumes:
-            volume_info['tissue_volumes'] = tissue_volumes
 
         return volume_info
 
@@ -703,9 +706,8 @@ class ANTsSegmentation:
             # Log volume information
             if volumes:
                 self.logger.info("Segmentation volumes:")
-                if 'tissue_volumes' in volumes:
-                    for tissue, volume in volumes['tissue_volumes'].items():
-                        self.logger.info(f"  {tissue}: {volume:.2f} mm³")
+                if 'brain_volume' in volumes:
+                    self.logger.info(f"  BVOL: {volumes['brain_volume']:.2f} mm³")
                 if 'label_volumes' in volumes:
                     for label, volume in volumes['label_volumes'].items():
                         self.logger.info(f"  Label {label}: {volume:.2f} mm³")
@@ -803,17 +805,30 @@ class ANTsSegmentation:
                 random_seed=1
             )
             
-            transforms = [
-                reg['fwdtransforms'][0],  # Affine transform
-                reg['fwdtransforms'][1]   # Warp transform
-            ]
-            
+            # These registrations are subject -> template (fixed=brain_template,
+            # moving=brain_image), so fwdtransforms maps subject -> template.
+            # Everything downstream needs the opposite direction -- pulling
+            # template-space images (the extraction mask, and the label atlas in
+            # the 'quick' method) into subject space -- which is invtransforms:
+            # "invtransforms: Transforms to move from fixed to moving image".
+            #
+            # Using fwdtransforms here yielded a mask covering the entire FOV, so
+            # joint label fusion labelled air, skull and neck: 100% of voxels
+            # labelled, no background at all, label 4 alone taking 69.6% of the
+            # image, and an 11.5 L "brain volume" on ABIDE sub-0051456. The
+            # initial-mask call above was always correct; only this one was not.
+            transforms = list(reg['invtransforms'])
+
         except Exception as e:
             self.logger.warning(f"SyN registration failed: {str(e)}")
             self.logger.info("Using affine registration only")
-            transforms = [affine_reg['fwdtransforms'][0]]
-        
-        # Apply final transforms to extraction mask
+            transforms = list(affine_reg['invtransforms'])
+
+        # Apply final transforms to extraction mask.
+        # whichtoinvert is deliberately left unset: apply_transforms auto-detects
+        # the (True, False) pattern for the [affine.mat, InverseWarp] shape that
+        # invtransforms returns. Hand-maintaining that bookkeeping per element is
+        # what went wrong before, so it is not reintroduced here.
         ext_mask = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellumExtractionMask.nii.gz'))
         final_mask = ants.apply_transforms(
             fixed=n4_image,
@@ -833,17 +848,9 @@ class ANTsSegmentation:
             'BrainExtractionMask': final_mask
         }
         
-        # Handle transforms based on what's available
-        if len(transforms) > 1:
-            results['TemplateToSubject1GenericAffine'] = transforms[0]
-            results['TemplateToSubject0Warp'] = transforms[1]
-        elif len(transforms) == 1:
-            # Only affine available
-            results['TemplateToSubject1GenericAffine'] = transforms[0]
-            results['TemplateToSubject0Warp'] = None
-        else:
-            # No transforms (shouldn't happen but handle gracefully)
-            results['TemplateToSubject1GenericAffine'] = None
-            results['TemplateToSubject0Warp'] = None
-            
+        # Template -> subject transforms, kept as the ordered list ANTsPy
+        # returned. Consumers pass it to apply_transforms verbatim rather than
+        # rebuilding it element by element.
+        results['TemplateToSubjectTransforms'] = transforms
+
         return results
