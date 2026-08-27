@@ -629,7 +629,6 @@ class ANTsSegmentation:
                     'T_template': 'T_template0.nii.gz',
                     'BrainCerebellum': 'T_template0_BrainCerebellum.nii.gz',
                     'ProbabilityMask': 'T_template0_BrainCerebellumProbabilityMask.nii.gz',
-                    'ExtractionMask': 'T_template0_BrainCerebellumExtractionMask.nii.gz',
                     'priors_dir': 'Priors2'
                 },
                 'template_description': 'OASIS-30 Atropos template'
@@ -775,10 +774,15 @@ class ANTsSegmentation:
         brain_mask = ants.iMath(brain_mask, "GetLargestComponent")
         brain_image = n4_image * brain_mask
         
-        # Register to brain template
+        # Register to the brain-only template. brain_image is skull-stripped at
+        # this point, so the fixed image must be skull-stripped too
+        # (T_template0_BrainCerebellum, already loaded above as reg_template).
+        # Registering it onto the whole-head T_template0 biased the affine
+        # toward scaling the brain up to the head outline, inflating every
+        # template-space image warped back with these transforms.
         self.logger.info("Registering to template")
-        brain_template = ants.image_read(str(self.template_dir / 'T_template0.nii.gz'))
-        
+        brain_template = reg_template
+
         try:
             # First try affine registration
             affine_reg = ants.registration(
@@ -808,7 +812,7 @@ class ANTsSegmentation:
             # These registrations are subject -> template (fixed=brain_template,
             # moving=brain_image), so fwdtransforms maps subject -> template.
             # Everything downstream needs the opposite direction -- pulling
-            # template-space images (the extraction mask, and the label atlas in
+            # template-space images (the brain probability mask, and the label atlas in
             # the 'quick' method) into subject space -- which is invtransforms:
             # "invtransforms: Transforms to move from fixed to moving image".
             #
@@ -824,19 +828,25 @@ class ANTsSegmentation:
             self.logger.info("Using affine registration only")
             transforms = list(affine_reg['invtransforms'])
 
-        # Apply final transforms to extraction mask.
+        # Build the final brain mask from the warped *ProbabilityMask*, exactly
+        # as in the initial-extraction step above but through the refined
+        # affine+SyN transforms. NOT the ExtractionMask: in the OASIS-30 kit
+        # that file is the generous registration-scope mask (5.9 L in template
+        # space, antsBrainExtraction.sh's -f argument), not a brain mask --
+        # using it here delivered a 5.6 L "brain" on ABIDE sub-0051456 even
+        # with the transform direction fixed. The probability mask thresholded
+        # at 0.5 is 1.34 L, matching the brain-only template.
         # whichtoinvert is deliberately left unset: apply_transforms auto-detects
         # the (True, False) pattern for the [affine.mat, InverseWarp] shape that
         # invtransforms returns. Hand-maintaining that bookkeeping per element is
         # what went wrong before, so it is not reintroduced here.
-        ext_mask = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellumExtractionMask.nii.gz'))
         final_mask = ants.apply_transforms(
             fixed=n4_image,
-            moving=ext_mask,
+            moving=prob_mask,
             transformlist=transforms,
-            interpolator='nearestNeighbor'
+            interpolator='linear'
         )
-        
+
         # Ensure final mask is binary
         final_mask = ants.threshold_image(final_mask, 0.5, 1.0)
         final_mask = ants.iMath(final_mask, "FillHoles")

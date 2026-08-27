@@ -195,11 +195,11 @@ class TestANTsSegmentation(unittest.TestCase):
                     f"no probseg written for label {label_id}: {written}")
 
     def test_cortical_thickness_uses_invtransforms_for_template_to_subject(self):
-        """The extraction mask must come template -> subject, i.e. invtransforms.
+        """The final brain mask must come template -> subject, i.e. invtransforms.
 
         Regression test. compute_cortical_thickness registers subject -> template
         (fixed=brain_template, moving=brain_image), so fwdtransforms maps
-        subject -> template. Pulling the template-space extraction mask into
+        subject -> template. Pulling the template-space brain mask into
         subject space with fwdtransforms produced a mask covering the whole FOV,
         so joint label fusion labelled air, skull and neck -- 100% of voxels
         labelled, no background, and an 11.5 L brain volume on ABIDE sub-0051456.
@@ -243,6 +243,95 @@ class TestANTsSegmentation(unittest.TestCase):
 
         # The stored template->subject transforms are the same ordered list
         self.assertEqual(results["TemplateToSubjectTransforms"], INV)
+
+    def _run_cortical_thickness_recording_calls(self):
+        """Run compute_cortical_thickness with mocks that tag every image read
+        with its source path and record all registration/apply_transforms calls.
+
+        Returns (registrations, applied, results).
+        """
+        def fake_image_read(path, *args, **kwargs):
+            img = mock_image_read()
+            img.src_path = str(path)
+            return img
+
+        registrations = []
+
+        def fake_registration(*args, **kwargs):
+            registrations.append(kwargs)
+            return {
+                "fwdtransforms": ["/fake/1Warp.nii.gz", "/fake/0GenericAffine.mat"],
+                "invtransforms": ["/fake/0GenericAffine.mat", "/fake/1InverseWarp.nii.gz"],
+                "warpedmovout": mock_image_read(),
+            }
+
+        applied = []
+
+        def fake_apply_transforms(*args, **kwargs):
+            applied.append(kwargs)
+            out = mock_image_read()
+            # Propagate the source tag so assertions can trace warped images
+            moving = kwargs.get("moving")
+            out.src_path = getattr(moving, "src_path", None)
+            return out
+
+        def fake_imath(img, *args, **kwargs):
+            return img
+
+        def fake_threshold(img, *args, **kwargs):
+            out = mock_image_read()
+            out.src_path = getattr(img, "src_path", None)
+            return out
+
+        with patch('src.antspy.wrapper.ants.image_read', side_effect=fake_image_read), \
+             patch('src.antspy.wrapper.ants.n4_bias_field_correction', side_effect=lambda img, **k: mock_image_read()), \
+             patch('src.antspy.wrapper.ants.registration', side_effect=fake_registration), \
+             patch('src.antspy.wrapper.ants.apply_transforms', side_effect=fake_apply_transforms), \
+             patch('src.antspy.wrapper.ants.threshold_image', side_effect=fake_threshold), \
+             patch('src.antspy.wrapper.ants.iMath', side_effect=fake_imath):
+            results = self.segmenter.compute_cortical_thickness(mock_image_read())
+
+        return registrations, applied, results
+
+    def test_final_brain_mask_derived_from_probability_mask(self):
+        """The final brain mask must come from the brain probability mask.
+
+        Regression test. T_template0_BrainCerebellumExtractionMask is the
+        generous registration-scope mask of the OASIS-30 kit (5.9 L in template
+        space -- antsBrainExtraction.sh's -f argument), not a brain mask. Using
+        it as the final mask labelled ~5.6 L of head on ABIDE sub-0051456. The
+        brain mask is the warped ProbabilityMask thresholded at 0.5 (1.34 L).
+        """
+        registrations, applied, results = self._run_cortical_thickness_recording_calls()
+
+        self.assertGreaterEqual(len(applied), 2)
+        final_mask_src = applied[-1]["moving"].src_path
+        self.assertIn(
+            "ProbabilityMask", final_mask_src,
+            f"final brain mask must be warped from the ProbabilityMask, got {final_mask_src}")
+        self.assertNotIn(
+            "ExtractionMask", final_mask_src,
+            "ExtractionMask is a registration-scope mask (5.9 L), not a brain mask")
+        self.assertIn(
+            "ProbabilityMask", results["BrainExtractionMask"].src_path,
+            "returned BrainExtractionMask must trace back to the ProbabilityMask")
+
+    def test_template_registration_targets_brain_only_template(self):
+        """Affine/SyN registration must target the brain-only template.
+
+        The subject image is skull-stripped before this registration, so the
+        fixed image must be T_template0_BrainCerebellum. Registering a
+        brain-only image onto the whole-head T_template0 biases the affine to
+        scale the brain toward the head outline, inflating the warped mask.
+        """
+        registrations, applied, results = self._run_cortical_thickness_recording_calls()
+
+        self.assertGreaterEqual(len(registrations), 2)
+        for i, reg in enumerate(registrations):
+            fixed_src = reg["fixed"].src_path
+            self.assertIn(
+                "BrainCerebellum", fixed_src,
+                f"registration #{i} must target the brain-only template, got {fixed_src}")
 
     def test_organize_bids_output_with_session(self):
         """Test organizing outputs in BIDS format with session"""
