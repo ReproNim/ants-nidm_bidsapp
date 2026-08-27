@@ -79,7 +79,8 @@ sys.modules['bids'] = mock_bids
 # Import after mocking
 from src.run import (process_participant, process_session, main, nidm_conversion,
                      create_dataset_description, subject_output_dir,
-                     find_nidm_input_file, BIDS_VERSION)
+                     find_nidm_input_file, save_processing_summary,
+                     BIDS_VERSION, APP_VERSION)
 
 class TestRun(unittest.TestCase):
     """Test cases for the run module"""
@@ -486,6 +487,44 @@ class TestRun(unittest.TestCase):
             desc = json.load(f)
             self.assertEqual(desc["BIDSVersion"], BIDS_VERSION)
             self.assertEqual(desc["GeneratedBy"][0]["Version"], "1.0.0")
+
+    def test_processing_summary_lands_inside_subject_dir(self):
+        """BABS zips only sub-<id>/, so the summary must be written inside it."""
+        subject_dir = subject_output_dir(self.output_dir, "01")
+        path = save_processing_summary(
+            logger=self.logger,
+            subject_dir=subject_dir,
+            bids_subject="01",
+            bids_session=None,
+            app_version=APP_VERSION,
+            succeeded=True,
+            nidm_written=True,
+        )
+        self.assertEqual(path, subject_dir / "processing_summary.json")
+        with open(path) as f:
+            summary = json.load(f)
+        self.assertEqual(summary["success"], 1)
+        self.assertEqual(summary["failure"], 0)
+        self.assertEqual(summary["success_list"], ["sub-01"])
+        self.assertEqual(summary["version_info"]["ants-nidm"]["version"], APP_VERSION)
+        self.assertIn("ants", summary["version_info"])
+
+    def test_processing_summary_records_failure(self):
+        """A failed subject is recorded as such, with the session in its label."""
+        subject_dir = subject_output_dir(self.output_dir, "01", "baseline")
+        path = save_processing_summary(
+            logger=self.logger,
+            subject_dir=subject_dir,
+            bids_subject="01",
+            bids_session="baseline",
+            app_version=APP_VERSION,
+            succeeded=False,
+            nidm_written=False,
+        )
+        with open(path) as f:
+            summary = json.load(f)
+        self.assertEqual(summary["failure_list"], ["sub-01_ses-baseline"])
+        self.assertFalse(summary["nidm_written"])
 
     def test_subject_output_dir(self):
         """Per-subject output dir is the zip unit: no app wrapper, no nidm/."""

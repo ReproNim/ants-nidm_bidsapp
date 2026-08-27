@@ -22,6 +22,10 @@ from src.antspy.wrapper import ANTsSegmentation
 # valid BIDSVersion value.
 BIDS_VERSION = "1.8.0"
 
+# App version. Kept in one place: initialize(), --version, and the per-subject
+# processing_summary.json all read it.
+APP_VERSION = "0.1.0"
+
 def setup_logger(log_dir, verbose=False):
     """Set up logging configuration."""
     os.makedirs(log_dir, exist_ok=True)
@@ -105,6 +109,73 @@ def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None):
     return next((c for c in candidates if c.exists()), None)
 
 
+def get_version_info(app_version):
+    """Version provenance for the delivered outputs.
+
+    Mirrors the sibling freesurfer-nidm app's version_info block so the two
+    derivatives can be compared. ANTs' version comes from ANTsPy rather than a
+    base image, since that is what actually performs the segmentation.
+    """
+    try:
+        ants_version = ants.__version__
+    except Exception:
+        ants_version = "unknown"
+
+    return {
+        "ants-nidm": {
+            "version": app_version,
+            "source": "setup.py",
+            "timestamp": datetime.now().isoformat(),
+        },
+        "ants": {
+            "version": ants_version,
+            "source": "antspyx",
+        },
+        "python": {
+            "version": sys.version,
+            "packages": {},
+        },
+    }
+
+
+def save_processing_summary(logger, subject_dir, bids_subject, bids_session,
+                            app_version, succeeded, nidm_written):
+    """Write processing_summary.json inside the subject directory.
+
+    BABS zips only sub-<id>/, so anything written outside it is dropped from the
+    delivered derivative -- which is why this goes in the subject dir and not the
+    derivative root. Same file the freesurfer-nidm app ships per subject.
+    """
+    subject_label = f"sub-{bids_subject}"
+    if bids_session:
+        subject_label += f"_ses-{bids_session}"
+
+    summary = {
+        "total": 1,
+        "success": 1 if succeeded else 0,
+        "failure": 0 if succeeded else 1,
+        "skipped": 0,
+        "success_list": [subject_label] if succeeded else [],
+        "failure_list": [] if succeeded else [subject_label],
+        "skipped_list": [],
+        "nidm_written": nidm_written,
+        "version_info": get_version_info(app_version),
+    }
+
+    try:
+        subject_dir = Path(subject_dir)
+        subject_dir.mkdir(parents=True, exist_ok=True)
+        output_path = subject_dir / "processing_summary.json"
+        with open(output_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        logger.info(f"Processing summary saved to {output_path}")
+        return output_path
+    except OSError as e:
+        # Provenance is not worth failing an otherwise-good subject over.
+        logger.warning(f"Could not write processing summary: {e}")
+        return None
+
+
 def create_dataset_description(output_dir, app_version):
     """Create a dataset_description.json file in the output directory."""
     dataset_description = {
@@ -165,8 +236,8 @@ def parse_arguments():
                         type=int, default=1)
     parser.add_argument('-v', '--verbose', help='Verbose output',
                         action='store_true')
-    parser.add_argument('--version', action='version', 
-                        version='ANTs BIDS App v0.1.0')
+    parser.add_argument('--version', action='version',
+                        version=f'ANTs BIDS App v{APP_VERSION}')
     
     args = parser.parse_args()
     
@@ -214,7 +285,7 @@ def initialize(args):
     # the surrounding dataset (BABS/DataLad) rather than by a per-subject job.
     # It is written for standalone runs; under BABS only sub-<id>/ is zipped, so
     # this file is not part of the delivered per-subject unit and cannot collide.
-    create_dataset_description(derivatives_dir, '0.1.0')
+    create_dataset_description(derivatives_dir, APP_VERSION)
 
     # Initialize segmentation with appropriate parameters (only if not skipping ANTs)
     segmenter = None
@@ -404,8 +475,18 @@ def process_participant(args, logger):
             input_file=input_file,
         )
     
+    save_processing_summary(
+        logger=logger,
+        subject_dir=subject_output_dir(derivatives_dir, bids_subject, bids_session),
+        bids_subject=bids_subject,
+        bids_session=bids_session,
+        app_version=APP_VERSION,
+        succeeded=success,
+        nidm_written=(not args.skip_nidm) and success,
+    )
+
     logger.info(f"Participant level analysis complete. Processing {'succeeded' if success else 'failed'}")
-    
+
     return 0 if success else 1
 
 def process_session(args, logger):
@@ -492,8 +573,18 @@ def process_session(args, logger):
             input_file=input_file,
         )
     
+    save_processing_summary(
+        logger=logger,
+        subject_dir=subject_output_dir(derivatives_dir, bids_subject, bids_session),
+        bids_subject=bids_subject,
+        bids_session=bids_session,
+        app_version=APP_VERSION,
+        succeeded=success,
+        nidm_written=(not args.skip_nidm) and success,
+    )
+
     logger.info(f"Session level analysis complete. Processing {'succeeded' if success else 'failed'}")
-    
+
     return 0 if success else 1
 
 

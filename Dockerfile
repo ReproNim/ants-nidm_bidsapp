@@ -57,13 +57,20 @@ WORKDIR /app
 
 # Copy application code
 COPY setup.py /app/
+COPY requirements.txt /app/
 COPY src/ /app/src/
 COPY README.md /app/
 
-# Install the application and NIDM conversion toolkit
-RUN pip3 install -e . && \
-    pip3 install -e src/ants_seg_to_nidm && \
-    pip3 install -r src/ants_seg_to_nidm/requirements.txt && \
+# Install the application and NIDM conversion toolkit.
+# Order matters and mirrors Singularity (and the sibling freesurfer-nidm app):
+# the NIDM submodule first with its loose deps, then the top-level
+# requirements.txt applies the authoritative pins on top. The submodule's own
+# requirements.txt is deliberately NOT installed -- it pins pynidm==4.2.4, which
+# would silently override the 4.5.0 pin here.
+RUN pip3 install -e src/ants_seg_to_nidm && \
+    pip3 install -r requirements.txt && \
+    pip3 install --no-cache-dir --upgrade 'rdflib>=7.0.0,<8' && \
+    pip3 install -e . && \
     chmod -R 755 /app
 
 # Set environment variables

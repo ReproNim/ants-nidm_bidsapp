@@ -87,15 +87,20 @@ From: ubuntu:22.04
     echo "Labels directory contents:"
     ls -la /opt/data/OASIS-TRT-20_DKT31_CMA_labels_v2/ | head -5
 
-    # Install Python dependencies and application code
-    cd /opt
-    python3 -m pip install -r requirements.txt
-    python3 -m pip install -e .
-
-    # Install ants_seg_to_nidm and its requirements
+    # Install Python dependencies and application code.
+    # Order matters and mirrors the Dockerfile (and the sibling freesurfer-nidm
+    # app): the NIDM submodule goes in first with its loose deps, then the
+    # top-level requirements.txt applies the authoritative pins on top. The
+    # submodule's own requirements.txt is deliberately NOT installed -- it pins
+    # pynidm==4.2.4, which would silently override the 4.5.0 pin here.
     cd /opt/src/ants_seg_to_nidm
     python3 -m pip install -e .
+
+    cd /opt
     python3 -m pip install -r requirements.txt
+    # oxrdflib (pulled in by pynidm 4.5.0) requires rdflib<8; pynidm wants >=7.
+    python3 -m pip install --no-cache-dir --upgrade 'rdflib>=7.0.0,<8'
+    python3 -m pip install -e .
 
     # Mirror Docker's writable scratch directory
     mkdir -p /work

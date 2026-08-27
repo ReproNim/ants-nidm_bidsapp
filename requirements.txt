@@ -1,6 +1,20 @@
+# Main dependencies
 antspyx
 nibabel>=4.0.0
 numpy>=1.20.0
 pybids>=0.15.1
 pytest>=7.0.0
 natsort>=8.0.0
+# NIDM stack. Kept in lockstep with the sibling freesurfer-nidm app: the shared
+# NIDM input datasets (derivatives/nidm_4.5.0) are produced with PyNIDM 4.5.0,
+# and this file -- not src/ants_seg_to_nidm/requirements.txt -- is the single
+# source of truth for the container's NIDM pins.
+pynidm==4.5.0
+# PyNIDM 4.5.0 adds an oxigraph-backed rdflib store; pinned explicitly so the
+# runtime dep is visible. Requires rdflib<8 (see build files' rdflib upgrade).
+oxrdflib~=0.5.0
+# prov 3.0.0 moved NetworkX graph interop to the optional "graph" extra; pynidm's
+# nidm.experiment modules import prov.graph, so the extra (networkx) is required.
+# Without it `import ants_seg_to_nidm` dies with ModuleNotFoundError and every
+# NIDM conversion fails.
+prov[graph]
