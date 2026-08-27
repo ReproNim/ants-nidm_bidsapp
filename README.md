@@ -137,31 +137,38 @@ ants-nidm bids_dir output_dir participant \
 
 ## Outputs
 
-The app generates the following output structure:
+The app generates the following output structure. Everything produced for one
+subject lives under `sub-XX/` -- that directory is the unit BABS zips, so two
+subjects can never write to the same path:
 
 ```
 output_dir/
-├── ants-nidm_bidsapp/                          # Main BIDS App output directory
-│   ├── ants-seg/                               # ANTs segmentation derivatives
-│   │   ├── dataset_description.json
-│   │   └── sub-XX/
-│   │       ├── ses-YY/                         # For multi-session datasets
-│   │       │   ├── anat/
-│   │       │   │   ├── sub-XX_ses-YY_T1w_space-orig_dseg.nii.gz
-│   │       │   │   ├── sub-XX_ses-YY_T1w_BrainSegmentation.nii.gz
-│   │       │   │   └── sub-XX_ses-YY_T1w_BrainSegmentationPosteriors*.nii.gz
-│   │       │   └── stats/
-│   │       │       ├── sub-XX_ses-YY_antslabelstats.csv
-│   │       │       └── sub-XX_ses-YY_antsbrainvols.csv
-│   │       └── anat/, stats/                   # For single-session datasets (no ses-)
-│   └── nidm/                                   # NIDM outputs (flat structure)
-│       ├── dataset_description.json
-│       ├── sub-01_ses-baseline.ttl            # NIDM files (Turtle format)
-│       └── sub-02_ses-baseline.ttl
+├── dataset_description.json                    # Derivative-root metadata (not part of the per-subject zip)
+├── sub-XX/                                     # Single-session datasets
+│   ├── anat/
+│   │   ├── sub-XX_T1w_space-orig_dseg.nii.gz
+│   │   ├── sub-XX_T1w_BrainSegmentation.nii.gz
+│   │   └── sub-XX_T1w_BrainSegmentationPosteriors*.nii.gz
+│   ├── stats/
+│   │   ├── sub-XX_antslabelstats.csv
+│   │   └── sub-XX_antsbrainvols.csv
+│   ├── nidm.ttl                                # Input NIDM augmented with ANTs metrics
+│   └── ants_cde.ttl                            # Shared CDE vocabulary, shipped alongside
+├── sub-YY/
+│   └── ses-ZZ/                                 # Multi-session datasets nest a session level
+│       ├── anat/, stats/
+│       ├── nidm.ttl
+│       └── ants_cde.ttl
 └── logs/                                       # Processing logs
 ```
 
-**Note:** NIDM outputs use a **flat file structure** (all TTL files in one directory) rather than hierarchical subdirectories. This design choice simplifies file management and discovery. See CLAUDE.md for detailed rationale.
+**NIDM layout:** the output is always named `nidm.ttl` and subject identity is
+carried by the directory. There is deliberately no app-name wrapper directory
+and no shared `nidm/` directory: a shared `nidm/nidm.ttl` made every subject's
+NIDM collide on one path, and `unzip -n` at BABS merge time silently kept only
+the first subject's copy. `ants_cde.ttl` is a static, byte-identical vocabulary
+required to resolve the `ants_*` predicates; it is shipped next to `nidm.ttl`
+rather than merged into it, matching the sibling FreeSurfer and FSL apps.
 
 Output files include:
 - **Segmentation results** in BIDS-derivatives format

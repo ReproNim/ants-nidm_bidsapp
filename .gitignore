@@ -185,3 +185,6 @@ CLAUDE.md
 
 # Internal documentation and team files
 internal/
+
+# serena MCP server project cache
+.serena/

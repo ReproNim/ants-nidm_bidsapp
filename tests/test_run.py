@@ -9,14 +9,6 @@ from pathlib import Path
 import json
 import numpy as np
 
-# Handle pkg_resources import (deprecated in Python 3.12+)
-try:
-    import pkg_resources
-except ModuleNotFoundError:
-    # Create a mock pkg_resources for testing purposes
-    pkg_resources = MagicMock()
-    pkg_resources.DistributionNotFound = type('DistributionNotFound', (Exception,), {})
-
 # Add the project root to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
@@ -83,10 +75,11 @@ sys.modules['ants'] = mock_ants
 sys.modules['numpy'] = np
 sys.modules['nibabel'] = MagicMock()
 sys.modules['bids'] = mock_bids
-sys.modules['pkg_resources'] = pkg_resources
 
 # Import after mocking
-from src.run import process_participant, process_session, main, nidm_conversion, get_bids_version, create_dataset_description
+from src.run import (process_participant, process_session, main, nidm_conversion,
+                     create_dataset_description, subject_output_dir,
+                     find_nidm_input_file, BIDS_VERSION)
 
 class TestRun(unittest.TestCase):
     """Test cases for the run module"""
@@ -125,9 +118,12 @@ class TestRun(unittest.TestCase):
             f.write("dummy data")
 
     def create_derivatives_structure(self):
-        """Create a minimal derivatives structure for testing NIDM conversion"""
-        derivatives_dir = os.path.join(self.output_dir, "ants-nidm_bidsapp", "ants-seg")
-        # Create BIDS-compliant sub-*/ses-* directory structure
+        """Create a minimal derivatives structure for testing NIDM conversion.
+
+        Per-subject layout: the derivative root *is* output_dir, and everything
+        for a subject lives under output_dir/sub-<id>/[ses-<x>/].
+        """
+        derivatives_dir = self.output_dir
         subject_dir = os.path.join(derivatives_dir, "sub-01", "ses-01")
         anat_dir = os.path.join(subject_dir, "anat")
         stats_dir = os.path.join(subject_dir, "stats")
@@ -156,8 +152,7 @@ class TestRun(unittest.TestCase):
         """Test NIDM conversion with proper file structure"""
         # Create derivatives structure
         derivatives_dir = self.create_derivatives_structure()
-        nidm_dir = os.path.join(self.output_dir, "ants-nidm_bidsapp", "nidm")
-        os.makedirs(nidm_dir, exist_ok=True)
+        subject_dir = os.path.join(derivatives_dir, "sub-01", "ses-01")
         
         # Run NIDM conversion
         with patch('subprocess.run') as mock_run:
@@ -168,18 +163,25 @@ class TestRun(unittest.TestCase):
             mock_process.stderr = ""
             mock_run.return_value = mock_process
             
+            # subprocess is mocked, so create the file the real converter would
+            def write_nidm(*a, **kw):
+                with open(os.path.join(subject_dir, "nidm.ttl"), "w") as f:
+                    f.write("@prefix nidm: <http://purl.org/nidash/nidm#> .\n")
+                return mock_process
+            mock_run.side_effect = write_nidm
+
             result = nidm_conversion(
                 self.logger,
                 derivatives_dir,
-                nidm_dir,
                 "01",
                 bids_session="01",  # Pass session to match test file structure
                 verbose=True
             )
-            
+
             # Check results
             self.assertTrue(result)
-            self.assertTrue(os.path.exists(nidm_dir))
+            # NIDM lands in the subject's own directory, named nidm.ttl
+            self.assertTrue(os.path.exists(os.path.join(subject_dir, "nidm.ttl")))
             
             # Verify subprocess call
             mock_run.assert_called_once()
@@ -193,6 +195,11 @@ class TestRun(unittest.TestCase):
             self.assertIn("-subjid", cmd_args)
             # TTL format is default, so -j flag should NOT be present
             self.assertNotIn("-j", cmd_args)
+            # ants_seg_to_nidm has no -session option; passing it would abort
+            self.assertNotIn("-session", cmd_args)
+            # Output is the per-subject nidm.ttl
+            self.assertEqual(cmd_args[cmd_args.index("-o") + 1],
+                             os.path.abspath(os.path.join(subject_dir, "nidm.ttl")))
             
             # Verify file paths exist
             paths_str = [arg for arg in cmd_args if ".csv" in arg or ".nii.gz" in arg][0]
@@ -203,14 +210,11 @@ class TestRun(unittest.TestCase):
 
     def test_nidm_conversion_missing_files(self):
         """Test NIDM conversion with missing required files"""
-        derivatives_dir = os.path.join(self.output_dir, "ants-nidm_bidsapp", "ants-seg")
-        nidm_dir = os.path.join(self.output_dir, "ants-nidm_bidsapp", "nidm")
-        os.makedirs(derivatives_dir)
-        
+        derivatives_dir = self.output_dir
+
         result = nidm_conversion(
             self.logger,
             derivatives_dir,
-            nidm_dir,
             "01",
             verbose=True
         )
@@ -296,7 +300,7 @@ class TestRun(unittest.TestCase):
                 # subject_id comes in as "sub-01", extract the label
                 bids_subject = subject_id.replace('sub-', '') if subject_id.startswith('sub-') else subject_id
                 seg_base = f"sub-{bids_subject}"
-                subject_dir = os.path.join(self.output_dir, 'ants-nidm_bidsapp', 'ants-seg', f'sub-{bids_subject}')
+                subject_dir = os.path.join(self.output_dir, f'sub-{bids_subject}')
                 if session_label:
                     subject_dir = os.path.join(subject_dir, f'ses-{session_label}')
                     seg_base += f"_ses-{session_label}"
@@ -418,7 +422,7 @@ class TestRun(unittest.TestCase):
                 # subject_id comes in as "sub-01", session_label as "ses-01"
                 bids_subject = subject_id.replace('sub-', '') if subject_id.startswith('sub-') else subject_id
                 seg_base = f"sub-{bids_subject}"
-                subject_dir = os.path.join(self.output_dir, 'ants-nidm_bidsapp', 'ants-seg', f'sub-{bids_subject}')
+                subject_dir = os.path.join(self.output_dir, f'sub-{bids_subject}')
                 if session_label:
                     bids_session = session_label.replace('ses-', '') if session_label.startswith('ses-') else session_label
                     subject_dir = os.path.join(subject_dir, f'ses-{bids_session}')
@@ -455,39 +459,64 @@ class TestRun(unittest.TestCase):
             mock_instance.run_subject.assert_called_once_with("sub-01", "ses-01", method="quick")
             mock_nidm.assert_called_once()
 
-    def test_get_bids_version(self):
-        """Test getting BIDS version from package"""
-        # Test with mock package
-        with patch('pkg_resources.get_distribution') as mock_dist:
-            mock_dist.return_value = MagicMock(version="0.1.0")
-            version = get_bids_version()
-            self.assertEqual(version, "0.1.0")
-            
-        # Test fallback when package not found
-        with patch('pkg_resources.get_distribution') as mock_dist:
-            mock_dist.side_effect = pkg_resources.DistributionNotFound()
-            version = get_bids_version()
-            self.assertEqual(version, "1.8.0")
-    
+    def test_bids_version_is_a_spec_version(self):
+        """BIDSVersion must be a BIDS *spec* version, not a library version.
+
+        pybids' package version is 0.x; if BIDS_VERSION ever gets sourced from a
+        library again this catches it.
+        """
+        major, minor = BIDS_VERSION.split(".")[:2]
+        self.assertGreaterEqual(int(major), 1,
+                                f"BIDS_VERSION {BIDS_VERSION!r} looks like a package version")
+        self.assertTrue(minor.isdigit())
+
     def test_create_dataset_description(self):
         """Test creation of dataset_description.json"""
         test_dir = os.path.join(self.temp_dir, "test_desc")
         os.makedirs(test_dir)
-        
-        # Test with mock version
-        with patch('src.run.get_bids_version') as mock_version:
-            mock_version.return_value = "0.1.0"
-            create_dataset_description(test_dir, "1.0.0")
-            
-            # Check if file exists
-            desc_file = os.path.join(test_dir, "dataset_description.json")
-            self.assertTrue(os.path.exists(desc_file))
-            
-            # Check content
-            with open(desc_file) as f:
-                desc = json.load(f)
-                self.assertEqual(desc["BIDSVersion"], "0.1.0")
-                self.assertEqual(desc["GeneratedBy"][0]["Version"], "1.0.0")
+
+        create_dataset_description(test_dir, "1.0.0")
+
+        # Check if file exists
+        desc_file = os.path.join(test_dir, "dataset_description.json")
+        self.assertTrue(os.path.exists(desc_file))
+
+        # Check content
+        with open(desc_file) as f:
+            desc = json.load(f)
+            self.assertEqual(desc["BIDSVersion"], BIDS_VERSION)
+            self.assertEqual(desc["GeneratedBy"][0]["Version"], "1.0.0")
+
+    def test_subject_output_dir(self):
+        """Per-subject output dir is the zip unit: no app wrapper, no nidm/."""
+        self.assertEqual(str(subject_output_dir("/out", "01")), "/out/sub-01")
+        self.assertEqual(str(subject_output_dir("/out", "01", "baseline")),
+                         "/out/sub-01/ses-baseline")
+
+    def test_no_cross_subject_nidm_collision(self):
+        """Two subjects must never resolve to the same NIDM output path."""
+        a = subject_output_dir(self.output_dir, "01") / "nidm.ttl"
+        b = subject_output_dir(self.output_dir, "02") / "nidm.ttl"
+        self.assertNotEqual(a, b)
+
+    def test_find_nidm_input_file_per_subject_nidm_ttl(self):
+        """sub-<id>/nidm.ttl is the layout the shared NIDM datasets use."""
+        nidm_in = Path(self.temp_dir) / "NIDM"
+        (nidm_in / "sub-01").mkdir(parents=True)
+        target = nidm_in / "sub-01" / "nidm.ttl"
+        target.write_text("")
+        (nidm_in / "nidm.ttl").write_text("")  # dataset-level fallback
+
+        # Per-subject file wins over the dataset-level fallback
+        self.assertEqual(find_nidm_input_file(nidm_in, "01"), target)
+        # Unknown subject falls back to the dataset-level file
+        self.assertEqual(find_nidm_input_file(nidm_in, "99"), nidm_in / "nidm.ttl")
+        # Session-nested form
+        sess = nidm_in / "sub-02" / "ses-baseline"
+        sess.mkdir(parents=True)
+        (sess / "nidm.ttl").write_text("")
+        self.assertEqual(find_nidm_input_file(nidm_in, "02", "baseline"),
+                         sess / "nidm.ttl")
 
 if __name__ == "__main__":
     unittest.main()

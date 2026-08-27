@@ -14,9 +14,15 @@ jobs:
         python-version: ["3.9", "3.10", "3.11", "3.12"]
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
+      with:
+        # src/ants_seg_to_nidm is a submodule. Without this the directory is
+        # empty on a clean runner, so nothing here ever exercises the NIDM
+        # converter -- and the container build below would produce an image
+        # with no converter in it.
+        submodules: recursive
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
@@ -26,4 +32,27 @@ jobs:
         pip install pytest pytest-cov
     - name: Run tests
       run: |
-        pytest --cov=src tests/ 
+        pytest --cov=src tests/
+
+  docker-build:
+    # Validates that the image actually builds from a clean checkout, on PRs as
+    # well as pushes -- a push-only build job can hide a real breakage for
+    # months. Singularity is deliberately NOT built in CI: on GitHub-hosted
+    # runners the unprivileged user-namespace restriction makes `apptainer
+    # build` hang for hours rather than fail, see
+    # ReproNim/freesurfer-nidm_bidsapp#12.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        df -h
+    - name: Build Docker image
+      run: |
+        docker build -t ants-nidm_bidsapp:ci .
+    - name: Smoke-test entrypoint
+      run: |
+        docker run --rm ants-nidm_bidsapp:ci --version
