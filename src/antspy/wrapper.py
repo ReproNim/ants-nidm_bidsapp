@@ -97,6 +97,15 @@ class ANTsSegmentation:
         self.prob_threshold = prob_threshold
         self.num_threads = num_threads
         self.verbose = verbose
+
+        # ANTsPy takes no threads argument: every ITK filter it calls reads
+        # ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS from the environment. The
+        # container pins that to 1 so an unconfigured run cannot oversubscribe a
+        # shared node, which meant --num-threads was accepted and then ignored --
+        # joint label fusion registers 20 atlases and is unusably slow at one
+        # thread. Set it here so --num-threads actually takes effect.
+        if self.num_threads and self.num_threads > 0:
+            os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(self.num_threads)
         
         # Set up logging
         self.logger = logging.getLogger('ants-nidm.segmentation')
