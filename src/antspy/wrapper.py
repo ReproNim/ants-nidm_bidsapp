@@ -629,6 +629,7 @@ class ANTsSegmentation:
                     'T_template': 'T_template0.nii.gz',
                     'BrainCerebellum': 'T_template0_BrainCerebellum.nii.gz',
                     'ProbabilityMask': 'T_template0_BrainCerebellumProbabilityMask.nii.gz',
+                    'ExtractionMask': 'T_template0_BrainCerebellumExtractionMask.nii.gz',
                     'priors_dir': 'Priors2'
                 },
                 'template_description': 'OASIS-30 Atropos template'
@@ -742,16 +743,29 @@ class ANTsSegmentation:
             spline_param=200
         )
         
-        # Initial brain extraction using registration template and probability mask
+        # Initial brain extraction, antsBrainExtraction.sh semantics: register
+        # the whole-head subject to the whole-head T_template0 with the
+        # ExtractionMask restricting the metric region (that is what that
+        # 5.9 L mask is for), then pull the brain probability mask into
+        # subject space. The previous init registered whole-head onto the
+        # brain-only BrainCerebellum template, rigid-only and unmasked --
+        # content-mismatched and without scaling, which turned out bistable
+        # across CPU types: identical code and input gave a 1.70 L final mask
+        # on node1406, 2.84 L on node2906 and 3.25 L on node2000. Affine (so
+        # head size lands in the transform, not the mask) plus matched content
+        # plus the metric mask keeps every node in the same basin.
         self.logger.info("Performing initial brain extraction")
+        head_template = ants.image_read(str(self.template_dir / 'T_template0.nii.gz'))
         reg_template = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellum.nii.gz'))
         prob_mask = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellumProbabilityMask.nii.gz'))
-        
-        # Initial rigid registration
+        extraction_mask = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellumExtractionMask.nii.gz'))
+
+        # Initial affine registration, metric restricted to the head region
         init_reg = ants.registration(
-            fixed=reg_template,
+            fixed=head_template,
             moving=n4_image,
-            type_of_transform='Rigid',
+            type_of_transform='Affine',
+            mask=extraction_mask,
             aff_metric='mattes',
             aff_sampling=32,
             aff_random_sampling_rate=0.2,
@@ -759,13 +773,13 @@ class ANTsSegmentation:
             verbose=True,
             random_seed=1
         )
-        
+
         # Transform probability mask to subject space
         init_mask = ants.apply_transforms(
             fixed=n4_image,
             moving=prob_mask,
             transformlist=init_reg['invtransforms'],
-            interpolator='lanczosWindowedSinc'
+            interpolator='linear'
         )
         
         # Create brain mask and extract brain

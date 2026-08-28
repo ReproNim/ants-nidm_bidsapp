@@ -316,18 +316,48 @@ class TestANTsSegmentation(unittest.TestCase):
             "ProbabilityMask", results["BrainExtractionMask"].src_path,
             "returned BrainExtractionMask must trace back to the ProbabilityMask")
 
-    def test_template_registration_targets_brain_only_template(self):
-        """Affine/SyN registration must target the brain-only template.
+    def test_initial_registration_is_head_to_head_with_extraction_metric_mask(self):
+        """The initial registration must match like content with like.
 
-        The subject image is skull-stripped before this registration, so the
+        Regression test. The old init registered the whole-head subject image
+        onto the brain-only BrainCerebellum template with a rigid-only
+        transform and no metric mask. That problem is bistable across CPU
+        types: identical code and input produced a 1.70 L mask on node1406,
+        2.84 L on node2906 and 3.25 L on node2000. Canonical
+        antsBrainExtraction.sh semantics instead: register whole-head to the
+        whole-head T_template0, restrict the metric with the ExtractionMask
+        (that file's actual job), and use an affine so head size differences
+        are absorbed by scaling, not by the mask.
+        """
+        registrations, applied, results = self._run_cortical_thickness_recording_calls()
+
+        self.assertGreaterEqual(len(registrations), 2)
+        init = registrations[0]
+        fixed_src = init["fixed"].src_path
+        self.assertTrue(
+            fixed_src.endswith("T_template0.nii.gz"),
+            f"init registration must target the whole-head template, got {fixed_src}")
+        self.assertIn(
+            "Affine", init.get("type_of_transform", ""),
+            "init registration needs scaling (affine), rigid cannot absorb head size")
+        mask = init.get("mask")
+        self.assertIsNotNone(mask, "init registration must restrict its metric with a mask")
+        self.assertIn(
+            "ExtractionMask", mask.src_path,
+            f"the metric mask must be the ExtractionMask, got {mask.src_path}")
+
+    def test_refinement_registrations_target_brain_only_template(self):
+        """Affine/SyN refinement must target the brain-only template.
+
+        The subject image is skull-stripped before these registrations, so the
         fixed image must be T_template0_BrainCerebellum. Registering a
         brain-only image onto the whole-head T_template0 biases the affine to
         scale the brain toward the head outline, inflating the warped mask.
         """
         registrations, applied, results = self._run_cortical_thickness_recording_calls()
 
-        self.assertGreaterEqual(len(registrations), 2)
-        for i, reg in enumerate(registrations):
+        self.assertGreaterEqual(len(registrations), 3)
+        for i, reg in enumerate(registrations[1:], start=1):
             fixed_src = reg["fixed"].src_path
             self.assertIn(
                 "BrainCerebellum", fixed_src,
