@@ -72,6 +72,26 @@ singularity build ants-nidm_bidsapp.sif docker-daemon://ants-nidm_bidsapp:latest
 
 ## Usage
 
+### Quickstart (container, recommended)
+
+Build the container once (see above), then run one subject with the bundled
+wrapper — it sets up the binds and writable scratch the image expects:
+
+```bash
+./run_container.sh ants-nidm_bidsapp.sif /path/to/bids /path/to/output 01
+```
+
+The wrapper works with an Apptainer/Singularity `.sif` file or a Docker image
+name, and passes any extra arguments straight to the app:
+
+```bash
+./run_container.sh ants-nidm_bidsapp.sif /path/to/bids /path/to/output 01 \
+  --num-threads 8 --nidm-input-dir /path/to/nidm --verbose
+```
+
+Expect roughly 1–2 hours per subject at 8–16 threads and up to ~18 GB of RAM
+for the default joint-label-fusion method.
+
 ### Basic Usage
 
 ```bash
