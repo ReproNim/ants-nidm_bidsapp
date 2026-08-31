@@ -20,6 +20,7 @@ From: ubuntu:22.04
         git \
         wget \
         unzip \
+        bc \
         && apt clean && \
         rm -rf /var/lib/apt/lists/*
 
@@ -38,6 +39,24 @@ From: ubuntu:22.04
     # Create application directories
     mkdir -p /opt/src
     mkdir -p /opt/data
+
+    # Canonical ANTs binaries, pinned release. The wrapper shells out to
+    # antsBrainExtraction.sh (the published extraction method the OASIS-30
+    # template kit was built for); ANTsPy does not ship the CLI tools or the
+    # scripts. The layout inside the release zip is not guaranteed, so locate
+    # antsBrainExtraction.sh and symlink its directory to a fixed path.
+    wget -q "https://github.com/ANTsX/ANTs/releases/download/v2.5.4/ants-2.5.4-ubuntu-22.04-X64-gcc.zip" -O /tmp/ants.zip
+    unzip -q /tmp/ants.zip -d /opt/ants-dist
+    rm /tmp/ants.zip
+    ABE="$(find /opt/ants-dist -type f -name antsBrainExtraction.sh | head -1)"
+    if [ -z "$ABE" ]; then
+        echo "ERROR: antsBrainExtraction.sh not found in ANTs release zip" >&2
+        exit 1
+    fi
+    ln -s "$(dirname "$ABE")" /opt/ants-bin
+    chmod -R a+rx /opt/ants-dist
+    test -x /opt/ants-bin/antsRegistration
+    test -x /opt/ants-bin/Atropos
 
     # Download and extract template files
     cd /opt/data
@@ -110,8 +129,9 @@ From: ubuntu:22.04
     # Add opt to Python path
     export PYTHONPATH=/opt:$PYTHONPATH
     # Add Python packages to path
-    export PATH=/usr/local/bin:$PATH
-    export ANTSPATH=/usr/local/bin
+    export PATH=/opt/ants-bin:/usr/local/bin:$PATH
+    # Trailing slash: older ANTs scripts concatenate ${ANTSPATH}tool directly
+    export ANTSPATH=/opt/ants-bin/
     export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
     export TMPDIR=/work
     export TEMP=/work

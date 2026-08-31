@@ -1,6 +1,8 @@
 # src/ants/wrapper.py
 import os
+import shutil
 import subprocess
+import tempfile
 import logging
 import importlib
 import ants
@@ -743,50 +745,61 @@ class ANTsSegmentation:
             spline_param=200
         )
         
-        # Initial brain extraction, antsBrainExtraction.sh semantics: register
-        # the whole-head subject to the whole-head T_template0 with the
-        # ExtractionMask restricting the metric region (that is what that
-        # 5.9 L mask is for), then pull the brain probability mask into
-        # subject space. The previous init registered whole-head onto the
-        # brain-only BrainCerebellum template, rigid-only and unmasked --
-        # content-mismatched and without scaling, which turned out bistable
-        # across CPU types: identical code and input gave a 1.70 L final mask
-        # on node1406, 2.84 L on node2906 and 3.25 L on node2000. Affine (so
-        # head size lands in the transform, not the mask) plus matched content
-        # plus the metric mask keeps every node in the same basin.
-        self.logger.info("Performing initial brain extraction")
-        head_template = ants.image_read(str(self.template_dir / 'T_template0.nii.gz'))
+        # Brain extraction: run the canonical antsBrainExtraction.sh, the
+        # published method the OASIS-30 template kit was built for, with each
+        # template file in its designed role (-e whole-head template, -m brain
+        # probability mask, -f extraction registration-scope mask). Two
+        # successive hand-rolled re-implementations each fixed one failure
+        # mode and left another (whole-head masks, CPU-type bistability, and
+        # finally 11/33 ABIDE Caltech subjects at 2.05-3.87 L on hard
+        # anatomies): the script's SyN stage and Atropos K=3 refinement are
+        # what adapt the mask to each subject, and they are not worth
+        # re-deriving in ANTsPy piece by piece.
+        self.logger.info("Performing brain extraction (antsBrainExtraction.sh)")
+        abe_script = shutil.which('antsBrainExtraction.sh')
+        if not abe_script:
+            raise RuntimeError(
+                "antsBrainExtraction.sh not found on PATH. The container must "
+                "ship the ANTs binaries (see Singularity/Dockerfile); ANTsPy "
+                "alone does not include them.")
+
+        abe_dir = Path(tempfile.mkdtemp(prefix='abe_', dir=str(self.temp_dir) if self.temp_dir else None))
+        try:
+            abe_input = abe_dir / 'n4.nii.gz'
+            ants.image_write(n4_image, str(abe_input))
+            abe_prefix = str(abe_dir / 'abe_')
+            cmd = [
+                abe_script,
+                '-d', '3',
+                '-a', str(abe_input),
+                '-e', str(self.template_dir / 'T_template0.nii.gz'),
+                '-m', str(self.template_dir / 'T_template0_BrainCerebellumProbabilityMask.nii.gz'),
+                '-f', str(self.template_dir / 'T_template0_BrainCerebellumExtractionMask.nii.gz'),
+                '-o', abe_prefix,
+            ]
+            self.logger.info(f"Running: {' '.join(cmd)}")
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            mask_path = Path(abe_prefix + 'BrainExtractionMask.nii.gz')
+            # The script can fail and still exit 0 (observed: missing `bc`
+            # printed a complaint to stdout and returned success), so the
+            # only trustworthy success signal is the output mask existing.
+            if proc.returncode != 0 or not mask_path.exists():
+                self.logger.error(f"antsBrainExtraction.sh stdout:\n{proc.stdout}")
+                self.logger.error(f"antsBrainExtraction.sh stderr:\n{proc.stderr}")
+                raise RuntimeError(
+                    f"antsBrainExtraction.sh failed (exit code {proc.returncode}, "
+                    f"mask present: {mask_path.exists()}). "
+                    f"stdout: {proc.stdout[-2000:]} stderr: {proc.stderr[-2000:]}")
+
+            final_mask = ants.image_read(str(mask_path))
+        finally:
+            # The extracted-brain intermediate is large; keep only what was
+            # read back into memory.
+            shutil.rmtree(abe_dir, ignore_errors=True)
+
+        brain_image = n4_image * final_mask
+
         reg_template = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellum.nii.gz'))
-        prob_mask = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellumProbabilityMask.nii.gz'))
-        extraction_mask = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellumExtractionMask.nii.gz'))
-
-        # Initial affine registration, metric restricted to the head region
-        init_reg = ants.registration(
-            fixed=head_template,
-            moving=n4_image,
-            type_of_transform='Affine',
-            mask=extraction_mask,
-            aff_metric='mattes',
-            aff_sampling=32,
-            aff_random_sampling_rate=0.2,
-            reg_iterations=[1000, 500, 250],
-            verbose=True,
-            random_seed=1
-        )
-
-        # Transform probability mask to subject space
-        init_mask = ants.apply_transforms(
-            fixed=n4_image,
-            moving=prob_mask,
-            transformlist=init_reg['invtransforms'],
-            interpolator='linear'
-        )
-        
-        # Create brain mask and extract brain
-        brain_mask = ants.threshold_image(init_mask, 0.5, 1.0)
-        brain_mask = ants.iMath(brain_mask, "FillHoles")
-        brain_mask = ants.iMath(brain_mask, "GetLargestComponent")
-        brain_image = n4_image * brain_mask
         
         # Register to the brain-only template. brain_image is skull-stripped at
         # this point, so the fixed image must be skull-stripped too
@@ -842,31 +855,9 @@ class ANTsSegmentation:
             self.logger.info("Using affine registration only")
             transforms = list(affine_reg['invtransforms'])
 
-        # Build the final brain mask from the warped *ProbabilityMask*, exactly
-        # as in the initial-extraction step above but through the refined
-        # affine+SyN transforms. NOT the ExtractionMask: in the OASIS-30 kit
-        # that file is the generous registration-scope mask (5.9 L in template
-        # space, antsBrainExtraction.sh's -f argument), not a brain mask --
-        # using it here delivered a 5.6 L "brain" on ABIDE sub-0051456 even
-        # with the transform direction fixed. The probability mask thresholded
-        # at 0.5 is 1.34 L, matching the brain-only template.
-        # whichtoinvert is deliberately left unset: apply_transforms auto-detects
-        # the (True, False) pattern for the [affine.mat, InverseWarp] shape that
-        # invtransforms returns. Hand-maintaining that bookkeeping per element is
-        # what went wrong before, so it is not reintroduced here.
-        final_mask = ants.apply_transforms(
-            fixed=n4_image,
-            moving=prob_mask,
-            transformlist=transforms,
-            interpolator='linear'
-        )
-
-        # Ensure final mask is binary
-        final_mask = ants.threshold_image(final_mask, 0.5, 1.0)
-        final_mask = ants.iMath(final_mask, "FillHoles")
-        final_mask = ants.iMath(final_mask, "GetLargestComponent")
-        
-        # Prepare results dictionary
+        # Prepare results dictionary. BrainExtractionMask is the canonical
+        # script's product, untouched: its Atropos refinement and morphology
+        # already finalized it.
         results = {
             'BrainSegmentationN4': n4_image,
             'BrainExtractionMask': final_mask

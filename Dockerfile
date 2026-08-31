@@ -18,6 +18,7 @@ RUN apt-get update && \
         cmake \
         build-essential \
         libgomp1 \
+        bc \
         ca-certificates && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -30,6 +31,22 @@ RUN pip3 install --no-cache-dir \
     pybids \
     nipype \
     antspyx
+
+# Canonical ANTs binaries, pinned release. The wrapper shells out to
+# antsBrainExtraction.sh (the published extraction method the OASIS-30
+# template kit was built for); ANTsPy does not ship the CLI tools or the
+# scripts. The layout inside the release zip is not guaranteed, so locate
+# antsBrainExtraction.sh and symlink its directory to a fixed path.
+# Mirrors Singularity exactly and must stay in sync with it.
+RUN wget -q "https://github.com/ANTsX/ANTs/releases/download/v2.5.4/ants-2.5.4-ubuntu-22.04-X64-gcc.zip" -O /tmp/ants.zip && \
+    unzip -q /tmp/ants.zip -d /opt/ants-dist && \
+    rm /tmp/ants.zip && \
+    ABE="$(find /opt/ants-dist -type f -name antsBrainExtraction.sh | head -1)" && \
+    test -n "$ABE" && \
+    ln -s "$(dirname "$ABE")" /opt/ants-bin && \
+    chmod -R a+rx /opt/ants-dist && \
+    test -x /opt/ants-bin/antsRegistration && \
+    test -x /opt/ants-bin/Atropos
 
 # Create directory for templates with proper permissions
 RUN mkdir -p /opt/data && chmod 755 /opt/data
@@ -103,8 +120,9 @@ RUN pip3 install -e src/ants_seg_to_nidm && \
     chmod -R 755 /app
 
 # Set environment variables
-ENV ANTSPATH=/usr/local/bin
-ENV PATH=/usr/local/bin:$PATH
+# Trailing slash: older ANTs scripts concatenate ${ANTSPATH}tool directly
+ENV ANTSPATH=/opt/ants-bin/
+ENV PATH=/opt/ants-bin:/usr/local/bin:$PATH
 ENV ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
 
 # Create work directory for temporary files with world-writable permissions

@@ -194,61 +194,31 @@ class TestANTsSegmentation(unittest.TestCase):
                     any(f"label-{label_id}_probseg" in w for w in written),
                     f"no probseg written for label {label_id}: {written}")
 
-    def test_cortical_thickness_uses_invtransforms_for_template_to_subject(self):
-        """The final brain mask must come template -> subject, i.e. invtransforms.
+    def test_cortical_thickness_keeps_invtransforms_for_template_to_subject(self):
+        """TemplateToSubjectTransforms must be invtransforms of subject->template.
 
         Regression test. compute_cortical_thickness registers subject -> template
         (fixed=brain_template, moving=brain_image), so fwdtransforms maps
-        subject -> template. Pulling the template-space brain mask into
-        subject space with fwdtransforms produced a mask covering the whole FOV,
-        so joint label fusion labelled air, skull and neck -- 100% of voxels
-        labelled, no background, and an 11.5 L brain volume on ABIDE sub-0051456.
+        subject -> template. The 'quick' method pulls the template-space label
+        atlas into subject space with these transforms; using fwdtransforms
+        warped everything the wrong way (the original 11.5 L whole-FOV bug on
+        ABIDE sub-0051456).
         """
-        FWD = ["/fake/subj_to_tmpl_1Warp.nii.gz", "/fake/subj_to_tmpl_0GenericAffine.mat"]
-        INV = ["/fake/subj_to_tmpl_0GenericAffine.mat", "/fake/subj_to_tmpl_1InverseWarp.nii.gz"]
+        registrations, applied, subprocesses, results = \
+            self._run_cortical_thickness_recording_calls()
 
-        def fake_registration(*args, **kwargs):
-            return {
-                "fwdtransforms": list(FWD),
-                "invtransforms": list(INV),
-                "warpedmovout": mock_image_read(),
-            }
-
-        applied = []
-
-        def fake_apply_transforms(*args, **kwargs):
-            applied.append(kwargs)
-            return mock_image_read()
-
-        # Patch the name the module under test resolves, not this file's mock
-        # object: tests/test_run.py also assigns sys.modules['ants'], so which
-        # mock src.antspy.wrapper.ants points at depends on import order.
-        with patch('src.antspy.wrapper.ants.registration', side_effect=fake_registration), \
-             patch('src.antspy.wrapper.ants.apply_transforms', side_effect=fake_apply_transforms), \
-             patch('src.antspy.wrapper.ants.threshold_image', side_effect=lambda *a, **k: mock_image_read()), \
-             patch('src.antspy.wrapper.ants.iMath', side_effect=lambda img, *a, **k: img):
-            results = self.segmenter.compute_cortical_thickness(mock_image_read())
-
-        # Last apply_transforms call is the extraction mask -> subject space
-        self.assertGreaterEqual(len(applied), 1)
-        mask_call = applied[-1]
-        self.assertEqual(
-            mask_call["transformlist"], INV,
-            "extraction mask must be warped with invtransforms (template -> subject)")
-        self.assertNotEqual(
-            mask_call["transformlist"], FWD,
-            "using fwdtransforms warps the mask the wrong way and yields a full-FOV mask")
-        # whichtoinvert must stay unset so ANTsPy infers (True, False) itself
-        self.assertIsNone(mask_call.get("whichtoinvert"))
-
-        # The stored template->subject transforms are the same ordered list
-        self.assertEqual(results["TemplateToSubjectTransforms"], INV)
+        INV = ["/fake/0GenericAffine.mat", "/fake/1InverseWarp.nii.gz"]
+        FWD = ["/fake/1Warp.nii.gz", "/fake/0GenericAffine.mat"]
+        self.assertEqual(results["TemplateToSubjectTransforms"], INV,
+                         "template->subject direction requires invtransforms")
+        self.assertNotEqual(results["TemplateToSubjectTransforms"], FWD)
 
     def _run_cortical_thickness_recording_calls(self):
         """Run compute_cortical_thickness with mocks that tag every image read
-        with its source path and record all registration/apply_transforms calls.
+        with its source path and record registration/apply_transforms calls
+        and the antsBrainExtraction.sh subprocess invocation.
 
-        Returns (registrations, applied, results).
+        Returns (registrations, applied, subprocesses, results).
         """
         def fake_image_read(path, *args, **kwargs):
             img = mock_image_read()
@@ -275,89 +245,107 @@ class TestANTsSegmentation(unittest.TestCase):
             out.src_path = getattr(moving, "src_path", None)
             return out
 
-        def fake_imath(img, *args, **kwargs):
-            return img
+        subprocesses = []
 
-        def fake_threshold(img, *args, **kwargs):
-            out = mock_image_read()
-            out.src_path = getattr(img, "src_path", None)
-            return out
+        def fake_subprocess_run(cmd, *args, **kwargs):
+            cmd = [str(c) for c in cmd]
+            subprocesses.append(cmd)
+            # Honour the script's contract: create the output mask the wrapper
+            # will check for, next to the -o prefix.
+            if any("antsBrainExtraction" in c for c in cmd) and "-o" in cmd:
+                prefix = cmd[cmd.index("-o") + 1]
+                Path(prefix + "BrainExtractionMask.nii.gz").touch()
+            return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch('src.antspy.wrapper.ants.image_read', side_effect=fake_image_read), \
+             patch('src.antspy.wrapper.ants.image_write', side_effect=lambda img, path: None), \
              patch('src.antspy.wrapper.ants.n4_bias_field_correction', side_effect=lambda img, **k: mock_image_read()), \
              patch('src.antspy.wrapper.ants.registration', side_effect=fake_registration), \
              patch('src.antspy.wrapper.ants.apply_transforms', side_effect=fake_apply_transforms), \
-             patch('src.antspy.wrapper.ants.threshold_image', side_effect=fake_threshold), \
-             patch('src.antspy.wrapper.ants.iMath', side_effect=fake_imath):
+             patch('src.antspy.wrapper.ants.threshold_image', side_effect=lambda img, *a, **k: img), \
+             patch('src.antspy.wrapper.ants.iMath', side_effect=lambda img, *a, **k: img), \
+             patch('src.antspy.wrapper.subprocess.run', side_effect=fake_subprocess_run), \
+             patch('src.antspy.wrapper.shutil.which', return_value='/opt/ants/bin/antsBrainExtraction.sh'):
             results = self.segmenter.compute_cortical_thickness(mock_image_read())
 
-        return registrations, applied, results
+        return registrations, applied, subprocesses, results
 
-    def test_final_brain_mask_derived_from_probability_mask(self):
-        """The final brain mask must come from the brain probability mask.
+    def test_brain_extraction_runs_canonical_ants_script(self):
+        """Brain extraction must be antsBrainExtraction.sh, not a hand-rolled copy.
 
-        Regression test. T_template0_BrainCerebellumExtractionMask is the
-        generous registration-scope mask of the OASIS-30 kit (5.9 L in template
-        space -- antsBrainExtraction.sh's -f argument), not a brain mask. Using
-        it as the final mask labelled ~5.6 L of head on ABIDE sub-0051456. The
-        brain mask is the warped ProbabilityMask thresholded at 0.5 (1.34 L).
+        Regression test. Two successive re-implementations of the extraction
+        (fix 4f57540, then 3f51754) each fixed one failure mode and left
+        another: the aug28 production run still delivered 11/33 subjects with
+        2.05-3.87 L masks on hard anatomies, because the hand-rolled pipeline
+        lacks the script's SyN stage and Atropos K=3 refinement. The canonical
+        script is the published method the OASIS-30 template kit was built
+        for, with each template file in its designed role:
+          -e whole-head template, -m brain probability mask,
+          -f extraction (registration-scope) mask.
         """
-        registrations, applied, results = self._run_cortical_thickness_recording_calls()
+        registrations, applied, subprocesses, results = \
+            self._run_cortical_thickness_recording_calls()
 
-        self.assertGreaterEqual(len(applied), 2)
-        final_mask_src = applied[-1]["moving"].src_path
-        self.assertIn(
-            "ProbabilityMask", final_mask_src,
-            f"final brain mask must be warped from the ProbabilityMask, got {final_mask_src}")
-        self.assertNotIn(
-            "ExtractionMask", final_mask_src,
-            "ExtractionMask is a registration-scope mask (5.9 L), not a brain mask")
-        self.assertIn(
-            "ProbabilityMask", results["BrainExtractionMask"].src_path,
-            "returned BrainExtractionMask must trace back to the ProbabilityMask")
+        abe = [c for c in subprocesses if any("antsBrainExtraction" in a for a in c)]
+        self.assertEqual(len(abe), 1, f"expected one antsBrainExtraction.sh call, got {subprocesses}")
+        cmd = abe[0]
 
-    def test_initial_registration_is_head_to_head_with_extraction_metric_mask(self):
-        """The initial registration must match like content with like.
+        def arg_of(flag):
+            self.assertIn(flag, cmd, f"missing {flag} in {cmd}")
+            return cmd[cmd.index(flag) + 1]
 
-        Regression test. The old init registered the whole-head subject image
-        onto the brain-only BrainCerebellum template with a rigid-only
-        transform and no metric mask. That problem is bistable across CPU
-        types: identical code and input produced a 1.70 L mask on node1406,
-        2.84 L on node2906 and 3.25 L on node2000. Canonical
-        antsBrainExtraction.sh semantics instead: register whole-head to the
-        whole-head T_template0, restrict the metric with the ExtractionMask
-        (that file's actual job), and use an affine so head size differences
-        are absorbed by scaling, not by the mask.
+        self.assertEqual(arg_of("-d"), "3")
+        self.assertTrue(arg_of("-e").endswith("T_template0.nii.gz"),
+                        "-e must be the whole-head template")
+        self.assertIn("ProbabilityMask", arg_of("-m"),
+                      "-m must be the brain probability mask")
+        self.assertIn("ExtractionMask", arg_of("-f"),
+                      "-f must be the extraction registration mask")
+
+        # The returned mask must be the script's output product
+        self.assertIn("BrainExtractionMask.nii.gz",
+                      results["BrainExtractionMask"].src_path,
+                      "BrainExtractionMask must be read back from the script's output")
+
+    def test_brain_extraction_raises_when_script_produces_no_mask(self):
+        """A silent antsBrainExtraction.sh failure must become a loud error.
+
+        Regression test. The script can fail and still exit 0 -- observed with
+        a missing `bc` dependency: it printed "we cant find the bc program"
+        to stdout, produced nothing, and returned success, so the failure only
+        surfaced later as an unrelated file-not-found from image_read. The
+        wrapper must verify the output mask exists and raise a RuntimeError
+        carrying the script's own output.
         """
-        registrations, applied, results = self._run_cortical_thickness_recording_calls()
+        def fake_subprocess_run(cmd, *args, **kwargs):
+            # Exit 0 but produce no output file
+            return MagicMock(returncode=0,
+                             stdout="we cant find the bc program", stderr="")
 
-        self.assertGreaterEqual(len(registrations), 2)
-        init = registrations[0]
-        fixed_src = init["fixed"].src_path
-        self.assertTrue(
-            fixed_src.endswith("T_template0.nii.gz"),
-            f"init registration must target the whole-head template, got {fixed_src}")
-        self.assertIn(
-            "Affine", init.get("type_of_transform", ""),
-            "init registration needs scaling (affine), rigid cannot absorb head size")
-        mask = init.get("mask")
-        self.assertIsNotNone(mask, "init registration must restrict its metric with a mask")
-        self.assertIn(
-            "ExtractionMask", mask.src_path,
-            f"the metric mask must be the ExtractionMask, got {mask.src_path}")
+        with patch('src.antspy.wrapper.ants.image_write', side_effect=lambda img, path: None), \
+             patch('src.antspy.wrapper.ants.n4_bias_field_correction', side_effect=lambda img, **k: mock_image_read()), \
+             patch('src.antspy.wrapper.subprocess.run', side_effect=fake_subprocess_run), \
+             patch('src.antspy.wrapper.shutil.which', return_value='/opt/ants/bin/antsBrainExtraction.sh'):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.segmenter.compute_cortical_thickness(mock_image_read())
+
+        self.assertIn("bc program", str(ctx.exception),
+                      "the script's own output must be in the error message")
 
     def test_refinement_registrations_target_brain_only_template(self):
-        """Affine/SyN refinement must target the brain-only template.
+        """Subject->template registrations must target the brain-only template.
 
-        The subject image is skull-stripped before these registrations, so the
-        fixed image must be T_template0_BrainCerebellum. Registering a
-        brain-only image onto the whole-head T_template0 biases the affine to
-        scale the brain toward the head outline, inflating the warped mask.
+        These run on the skull-stripped image (to produce the template-to-
+        subject transforms the 'quick' method needs), so the fixed image must
+        be T_template0_BrainCerebellum. Registering a brain-only image onto
+        the whole-head T_template0 biases the affine to scale the brain
+        toward the head outline.
         """
-        registrations, applied, results = self._run_cortical_thickness_recording_calls()
+        registrations, applied, subprocesses, results = \
+            self._run_cortical_thickness_recording_calls()
 
-        self.assertGreaterEqual(len(registrations), 3)
-        for i, reg in enumerate(registrations[1:], start=1):
+        self.assertGreaterEqual(len(registrations), 2)
+        for i, reg in enumerate(registrations):
             fixed_src = reg["fixed"].src_path
             self.assertIn(
                 "BrainCerebellum", fixed_src,
