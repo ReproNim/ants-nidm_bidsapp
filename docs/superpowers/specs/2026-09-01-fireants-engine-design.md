@@ -94,7 +94,7 @@ extract the seam into a new module:
 src/registration/
     __init__.py    # public API: warp_atlases, register_to_template, apply_warp
     fireants.py    # FireANTs implementation
-    convert.py     # ANTsImage <-> FireANTs Image conversion
+    handoff.py     # file-based ANTs <-> FireANTs handoff + geometry guard
 ```
 
 ### Interface
@@ -186,15 +186,66 @@ difference against the reference derivative and must not be mistaken for a
 registration difference when reading tier-3 results. `"nearest"` is retained
 precisely so the two effects can be separated — see section 9.
 
-### Conversion boundary
+### Conversion boundary — file-based, never in-memory
 
 ANTsPy holds images in memory; FireANTs loads through SimpleITK, whose numpy
-axis order differs. The ANTsImage → FireANTs → ANTsImage round trip is the
-highest-risk part of this change and the most likely home for a silent
-orientation flip. Atlas images and labels are read from disk by FireANTs
-directly (they exist as files under `self.brains_dir` / `self.labels_dir`);
-only `target`, `target_mask`, and the returned warped volumes cross the
-boundary. Round-trip fidelity is asserted in tier 1.
+axis order differs. Hand-rolling that conversion — pulling a numpy array out
+of an ANTsImage and reattaching spacing, origin and a direction matrix on the
+other side — is the highest-risk part of this change and the most likely home
+for a silent orientation flip.
+
+**So the design does not do it.** Every crossing goes through a NIfTI file on
+`TMPDIR` (`/work` in the container). NIfTI carries the affine canonically, and
+ANTsPy and SimpleITK are both well-tested readers and writers of it; neither
+side reconstructs a header from loose parts. This is the pattern the repo
+already uses for `antsBrainExtraction.sh` at `wrapper.py:769-795`
+(`ants.image_write` → subprocess → `ants.image_read`), so it introduces no new
+mechanism.
+
+What actually crosses, per subject:
+
+| Direction | Volumes | Mechanism |
+|---|---|---|
+| Atlas images and labels → FireANTs | 40 | none — read from `self.brains_dir` / `self.labels_dir` by path |
+| Template, template labels → FireANTs | 2 | none — read from `self.template_dir` by path |
+| `target`, `target_mask`, `brain_image` → FireANTs | 3 | `ants.image_write` to TMPDIR |
+| Warped atlases and labels → ANTsPy | 40 | FireANTs `write_image` to TMPDIR, `ants.image_read` back |
+| Warped template labels → ANTsPy (`quick`) | 1 | same |
+
+Roughly 300 MB of scratch I/O per subject, seconds of wall-clock against the
+twenty SyN registrations being eliminated. Note that 42 of the 86 volumes need
+no conversion at all: the atlases and templates are already NIfTI files on
+disk, so FireANTs reads them by path and ANTsPy never touches them.
+
+`TemplateWarp` (above) is the one thing that does *not* cross this boundary —
+it is a torch tensor produced and consumed entirely within FireANTs, which is
+precisely why it never needs ANTs-format serialisation. Images cross as files;
+the warp does not cross at all.
+
+**Two concrete footguns, recorded so they are not rediscovered:**
+
+- `fireants.io.Image.__init__` accepts an `orientation` argument that calls
+  `sitk.DICOMOrient` and *rewrites the header*. It must be left at `None`.
+  Passing it would reorient silently and every downstream volume would be
+  wrong in a way that still looks like a valid image.
+- `Image.__init__` also accepts `spacing`, `direction`, `origin` and `center`
+  overrides. These must be left unset so the header comes from the file.
+
+**Guard, in production and not only in tests.** A helper
+`assert_geometry_match(a, b, tol)` compares shape, spacing, origin and
+direction between an ANTsImage and what came back across the boundary, and
+raises rather than proceeding. It runs on every crossing, not just under
+pytest. A registration engine that silently returns a reoriented volume
+produces a well-formed segmentation, a well-formed `nidm.ttl`, and exit 0 —
+the failure mode this repo has already been bitten by.
+
+**Optional simplification, not adopted by default.** The container ships the
+full ANTs 2.5.4 binaries, which include `antsJointFusion`. Calling that CLI
+with the warped file paths instead of `ants.joint_label_fusion` would remove
+40 of the 42 read-backs and match the existing shell-out pattern. It is left
+out because it changes a currently-working call for an I/O saving that is
+already negligible; it is recorded here as the obvious next step if scratch
+I/O ever becomes the bottleneck.
 
 ## 5. CLI
 
@@ -250,8 +301,14 @@ mocks:
   image is read, with the missing device named in the message
 - `--device cpu` is accepted and does not raise
 - **round-trip fidelity**: an ANTsImage with a non-identity direction matrix
-  and anisotropic spacing survives ANTsImage → FireANTs → ANTsImage with voxel
-  data, spacing, origin, and direction intact
+  and anisotropic spacing survives the file-based handoff — write, load in
+  FireANTs, write back, read in ANTsPy — with voxel data, spacing, origin and
+  direction intact
+- `assert_geometry_match` raises on a deliberately reoriented volume, and does
+  not raise on an identical one — the guard is tested, not assumed
+- `fireants.io.Image` is constructed without `orientation`, `spacing`,
+  `direction`, `origin` or `center` overrides (asserted on the call, since
+  passing any of them rewrites the header)
 - warped labels contain only values present in the input labels — no
   interpolated intermediates, under both `onehot` and `nearest`
 - `batch_size` chunking returns the same number of atlases in the same order
@@ -334,7 +391,7 @@ before declaring failure.
 
 | Risk | Mitigation |
 |---|---|
-| Silent orientation flip in the ANTsImage ↔ FireANTs conversion | Tier-1 round-trip test with non-identity direction and anisotropic spacing |
+| Silent orientation flip crossing between ANTs and FireANTs | No in-memory conversion exists to get wrong: every crossing is a NIfTI file, the same mechanism already used for `antsBrainExtraction.sh`. Backed by `assert_geometry_match` on every crossing in production, plus tier-1 tests on the handoff and on the guard itself |
 | Registration converges to a plausible-but-wrong warp; app exits 0 with a well-formed TTL | Jacobian gate, BVOL envelope, per-label Dice against a known-good reference — all three, not one |
 | Template↔subject warp direction inverted, reproducing the 11.5 L brain-volume bug | Behavioural tier-1 direction test; `TemplateWarp` exposes a single direction rather than a list whose orientation depends on caller choice |
 | GPU OOM at full 20-atlas batch on smaller cards | `--fireants-batch-size`; default full batch only because `pi_satra` has 80 GB cards |
@@ -346,7 +403,7 @@ before declaring failure.
 ## 10. Deliverables
 
 1. `src/registration/` implementing `warp_atlases`, `register_to_template`,
-   `apply_warp`, and the ANTsImage ↔ FireANTs conversion
+   `apply_warp`, the file-based handoff, and `assert_geometry_match`
 2. `wrapper.py` with all five `ants.registration` / `ants.apply_transforms`
    sites deleted and `TemplateToSubjectTransforms` replaced by `TemplateWarp`
 3. `--device`, `--fireants-batch-size`, `--label-interpolation` in `run.py`
