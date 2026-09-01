@@ -53,7 +53,9 @@ work.
 
 ## 3. Scope
 
-Two phases, both behind one `--engine` flag. Phase 2 does not begin until
+FireANTs replaces the ANTs registration calls outright. There is no dual
+backend and no `--engine` flag: the ANTs registration path is deleted, not
+kept alongside. Two phases, sequenced by risk; phase 2 does not begin until
 phase 1 passes the tier-3 gate in section 8.
 
 **Phase 1 — the fusion registration loop.** Replace the twenty
@@ -76,68 +78,65 @@ to output layout.
 
 ## 4. Architecture
 
-`wrapper.py` is 871 lines. Rather than branching inside it, extract the seam
-into a new package:
+`wrapper.py` is 871 lines. Rather than inlining a torch pipeline into it,
+extract the seam into a new module:
 
 ```
 src/registration/
-    __init__.py          # RegistrationEngine protocol, get_engine(name, **opts)
-    ants_engine.py       # existing ants.registration path, moved unchanged
-    fireants_engine.py   # FireANTs path
+    __init__.py    # warp_atlases(...) — the only public entry point
+    fireants.py    # FireANTs implementation
 ```
 
 ### Interface
 
 ```python
-class RegistrationEngine(Protocol):
-    def warp_atlases(
-        self,
-        target: "ants.ANTsImage",       # masked_brain
-        target_mask: "ants.ANTsImage",  # BrainExtractionMask
-        atlas_paths: list[Path],
-        label_paths: list[Path],
-    ) -> tuple[list["ants.ANTsImage"], list["ants.ANTsImage"]]:
-        """Return (warped atlas images, warped atlas labels) in target space."""
+def warp_atlases(
+    target: "ants.ANTsImage",       # masked_brain
+    target_mask: "ants.ANTsImage",  # BrainExtractionMask
+    atlas_paths: list[Path],
+    label_paths: list[Path],
+    *,
+    device: str = "cuda",
+    batch_size: int = 0,            # 0 = all atlases in one batch
+    label_interpolation: str = "onehot",   # or "nearest"
+) -> tuple[list["ants.ANTsImage"], list["ants.ANTsImage"]]:
+    """Return (warped atlas images, warped atlas labels) in target space."""
 ```
 
-`target_mask` is accepted by both engines but used only by the FireANTs one
-(see below); `ants_engine` ignores it, preserving current behaviour exactly.
 Return types are ANTsImages so `ants.joint_label_fusion` consumes them
 unchanged. The fusion loop in `segment_image` collapses to a single
-`engine.warp_atlases(...)` call.
+`warp_atlases(...)` call. The module is separate from `wrapper.py` for
+testability and to keep an already-large file from growing, not to support a
+second backend.
 
-`ants_engine.warp_atlases` is a verbatim move of the current loop, including
-`type_of_transform='SyNRA'`, `reg_iterations=[200, 200, 100]`,
-`flow_sigma=3`, `aff_metric='mattes'`, `syn_metric='mattes'`, and
-`interpolator='nearestNeighbor'`. No behaviour change — this is what makes
-the agreement test in section 8 meaningful.
+### Registration
 
-### FireANTs engine
-
-Registration follows `scripts/pairwise/oasis.py`, using the authors'
-structure rather than invented settings: `AffineRegistration(scales=[4,2,1],
+Follows `scripts/pairwise/oasis.py`, using the authors' structure rather than
+invented settings: `AffineRegistration(scales=[4,2,1],
 iterations=[200,100,50])` to initialise, then `SyNRegistration(scales=[4,2,1],
 iterations=[200,100,50], deformation_type='compositive', optimizer='Adam')`
 with `init_affine` from the affine stage. SyN rather than Greedy, as the
 closer analogue to the `SyNRA` it replaces. Learning rate, `cc_kernel_size`,
-`smooth_grad_sigma` and `smooth_warp_sigma` are exposed as engine options with
-the oasis.py values as defaults, so tier-3 disagreement can be tuned without
-code changes.
+`smooth_grad_sigma` and `smooth_warp_sigma` are exposed as options with the
+oasis.py values as defaults, so tier-3 disagreement can be tuned without code
+changes.
 
-`target_mask` is passed to the masked loss path. The current ANTs call passes
-no mask; restricting the metric to the brain is expected to help rather than
-hurt, and is recorded here as an intentional difference.
+`target_mask` is passed to the masked loss path. The ANTs call being replaced
+passed no mask; restricting the metric to the brain is expected to help rather
+than hurt, and is recorded here as an intentional difference from the
+reference derivative.
 
 **Batching.** All twenty atlases register against one fixed target in a single
-`BatchedImages`. `--fireants-batch-size` (default 0 = all) allows chunking on
-smaller cards. On `pi_satra` (A100 80 GB / H100) full batch is the target
-configuration.
+`BatchedImages`. `batch_size` allows chunking on smaller cards. On `pi_satra`
+(A100 80 GB / H100) full batch is the target configuration.
 
-**Label warping.** Labels are warped with the fused generic-label sampler,
-which interpolates one-hot and returns argmax without materialising 97
-channels. This differs from the ANTs path's `nearestNeighbor`; it is generally
-the better choice, but it is a real source of Dice difference and must not be
-mistaken for a registration difference when reading tier-3 results.
+**Label warping.** Default `label_interpolation="onehot"` uses the fused
+generic-label sampler, which interpolates one-hot and returns argmax without
+materialising 97 channels. The replaced ANTs path used `nearestNeighbor`;
+one-hot is generally the better choice, but it is a real source of Dice
+difference against the reference derivative and must not be mistaken for a
+registration difference when reading tier-3 results. `"nearest"` is retained
+precisely so the two effects can be separated — see section 9.
 
 ### Conversion boundary
 
@@ -156,20 +155,24 @@ Added to `parse_arguments` in `src/run.py` and threaded through
 
 | Flag | Values | Default | Behaviour |
 |---|---|---|---|
-| `--engine` | `ants`, `fireants` | `ants` | Selects the registration backend |
-| `--device` | `cuda`, `cpu` | `cuda` | FireANTs compute device; ignored by `ants` |
+| `--device` | `cuda`, `cpu` | `cuda` | FireANTs compute device |
 | `--fireants-batch-size` | int | `0` (all) | Atlases per registration batch |
+| `--label-interpolation` | `onehot`, `nearest` | `onehot` | Atlas label warping method |
 
-`--engine fireants --device cuda` with no visible GPU **fails before any
-processing begins**, with a message naming the flag and the missing device. It
-does not fall back to CPU: FireANTs on CPU is slower than ANTs, and a silent
-fallback inside a BABS array turns a fast job into a many-hour one while still
-exiting 0.
+No `--engine` flag: FireANTs is the only registration backend.
 
-`--engine ants` is byte-for-byte the current pipeline and requires no GPU.
+`--method fusion` with `--device cuda` and no visible GPU **fails before any
+processing begins**, with a message naming the missing device. It does not
+fall back to CPU: FireANTs on CPU is slower than the ANTs code it replaces,
+and a silent fallback inside a BABS array turns a fast job into a many-hour
+one while still exiting 0. `--device cpu` remains available as an explicit
+opt-in for tests and small debugging runs.
 
-The default flips to `fireants` only after the tier-3 gate passes, as a
-separate commit.
+Phase 1 touches only the fusion loop, so `--method quick` still runs without a
+GPU. That changes in phase 2, when the template registration also moves.
+
+Rollback, if it is ever needed, is the previously delivered container plus the
+existing 38-subject derivative on disk — not a runtime flag.
 
 ## 6. Container
 
@@ -195,25 +198,30 @@ test asserts the ANTs, torch, and fireants versions match across both files.
 **Tier 1 — CI, no GPU, every push.** Real assertions on CPU tensors, not
 mocks:
 
-- engine dispatch: `get_engine('ants')` and `get_engine('fireants')` return the
-  right types; an unknown name raises
-- `--engine fireants --device cuda` on a GPU-less host exits non-zero before
-  any image is read, with the flag named in the message
+- `--method fusion --device cuda` on a GPU-less host exits non-zero before any
+  image is read, with the missing device named in the message
+- `--device cpu` is accepted and does not raise
 - **round-trip fidelity**: an ANTsImage with a non-identity direction matrix
   and anisotropic spacing survives ANTsImage → FireANTs → ANTsImage with voxel
   data, spacing, origin, and direction intact
 - warped labels contain only values present in the input labels — no
-  interpolated intermediates
-- `ants_engine.warp_atlases` produces the same calls as the pre-refactor loop
+  interpolated intermediates, under both `onehot` and `nearest`
+- `batch_size` chunking returns the same number of atlases in the same order
+  as a single full batch
 
-**Tier 2 — one GPU job on `pi_satra`, one real T1w.** Both engines end to end;
-outputs land in the `sub-XX/anat`, `sub-XX/stats` layout with `nidm.ttl` and
-`ants_cde.ttl` present.
+**Tier 2 — one GPU job on `pi_satra`, one real T1w.** Full pipeline end to
+end; outputs land in the `sub-XX/anat`, `sub-XX/stats` layout with `nidm.ttl`
+and `ants_cde.ttl` present.
 
 **Tier 3 — agreement, 3 Caltech subjects.** Reference:
 `/orcd/data/satra/002/datasets/simple2_datalad/study-ABIDE/site-Caltech/derivatives/babs-ants-nidm`
 (38 subjects, delivered and gate-passed). Metrics computed with FireANTs'
 `scripts/evalutils.py`.
+
+The reference segmentations already exist on disk, so no ANTs registration run
+is needed at comparison time. This is why deleting the ANTs registration path
+costs nothing for validation: the comparison is against delivered files, not
+against a live second backend.
 
 ## 8. Acceptance criteria
 
@@ -251,8 +259,11 @@ distribution exists for them yet — but they catch boundary degradation that
 volumetric Dice hides on large structures, and establish the baseline for
 future runs.
 
-Failing the gate blocks the default flip in section 5; it does not block
-merging the engine behind `--engine fireants`.
+Failing the gate blocks the merge. With no ANTs registration path left in the
+app, there is no half-landed state to fall back on: either the FireANTs output
+meets the bar against the delivered derivative, or the branch does not merge.
+Hyperparameters (section 4) and `--label-interpolation` are the tuning levers
+before declaring failure.
 
 ## 9. Risks
 
@@ -263,13 +274,15 @@ merging the engine behind `--engine fireants`.
 | GPU OOM at full 20-atlas batch on smaller cards | `--fireants-batch-size`; default full batch only because `pi_satra` has 80 GB cards |
 | `Dockerfile` / `Singularity` drift | Version-parity test across both files |
 | `fused_ops` build fails or is skipped, silently disabling the generic-label sampler | Container build asserts `import fireants_fused_ops` succeeds |
-| Label-warping method differs (one-hot argmax vs nearestNeighbor), confounding tier-3 attribution | Recorded explicitly in section 4; if tier 3 fails, re-run the ANTs engine with one-hot warping to separate the two effects |
+| Label-warping method differs (one-hot argmax vs nearestNeighbor), confounding tier-3 attribution | `--label-interpolation nearest` reproduces the reference's method, isolating the registration change from the interpolation change without needing an ANTs engine |
+| No in-app fallback if FireANTs regresses on some subject | The delivered 38-subject derivative and its container remain on disk; rollback is redeploying that image, and the tier-3 gate blocks merge rather than discovering this in production |
 
 ## 10. Phase 1 deliverables
 
-1. `src/registration/` package with both engines and the protocol
-2. `wrapper.py` fusion loop reduced to one `warp_atlases` call
-3. `--engine`, `--device`, `--fireants-batch-size` in `run.py`
+1. `src/registration/` module implementing `warp_atlases` on FireANTs
+2. `wrapper.py` fusion loop reduced to one `warp_atlases` call, with the
+   `ants.registration` / `ants.apply_transforms` calls deleted
+3. `--device`, `--fireants-batch-size`, `--label-interpolation` in `run.py`
 4. Updated `Dockerfile`, `Singularity`, `requirements.txt`, `run_container.sh`
 5. Tier-1 tests in `tests/test_registration.py`
 6. Tier-2 and tier-3 harnesses as submittable `sbatch` scripts under `scripts/`
