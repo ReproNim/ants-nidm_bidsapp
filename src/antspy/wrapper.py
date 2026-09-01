@@ -377,7 +377,7 @@ class ANTsSegmentation:
                 
             template_warp = thickness_results.get('TemplateWarp')
             if template_warp is None:
-                raise ValueError("No transforms available for template-to-subject mapping")
+                raise ValueError("No TemplateWarp available for template-to-subject mapping")
 
             label_map = build_label_map([self.template_labels_path])
             warped_labels = apply_warp(
@@ -797,10 +797,11 @@ class ANTsSegmentation:
         brain_image = n4_image * final_mask
 
         # Register to the brain-only template. brain_image is skull-stripped at
-        # this point, so the fixed image must be skull-stripped too.
-        # Registering onto the whole-head T_template0 biased the affine toward
-        # scaling the brain up to the head outline, inflating every
-        # template-space image warped back with these transforms.
+        # this point, so the template argument passed to register_to_template
+        # below must be skull-stripped too. Registering onto the whole-head
+        # T_template0 biased the affine toward scaling the brain up to the
+        # head outline, inflating every template-space image warped back
+        # through this warp.
         brain_template = ants.image_read(
             str(self.template_dir / 'T_template0_BrainCerebellum.nii.gz'))
 

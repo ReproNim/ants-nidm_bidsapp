@@ -532,6 +532,121 @@ class TestANTsSegmentation(unittest.TestCase):
         self.assertEqual(kwargs["batch_size"], 4)
         self.assertEqual(kwargs["label_interpolation"], "nearest")
 
+    def test_quick_applies_warp_with_correct_argument_order(self):
+        """segment_image(method='quick') must call apply_warp as
+        apply_warp(warp, moving=template_label_image, reference=BrainSegmentationN4).
+
+        Discriminating: apply_warp's signature is
+        apply_warp(warp, moving, reference, *, ...). A call-count-only check
+        would still pass if moving and reference were transposed, or if the
+        wrong image (e.g. BrainExtractionMask, or the template itself) were
+        threaded through instead of BrainSegmentationN4 -- exactly the class
+        of bug (wrong direction / wrong image into a warp call) that produced
+        the 11.5 L regression this task's brief is about. This test pins the
+        identity of each positional argument, so a moving/reference swap or a
+        wrong-image substitution fails it, and asserts moving is not
+        reference so a "pass the same object twice" bug cannot slip through
+        either.
+        """
+        fake_labels_path = self.temp_dir / "fake_template_labels.nii.gz"
+        fake_labels_path.touch()
+        self.segmenter.template_labels_path = fake_labels_path
+
+        template_warp = object()
+        template_label_image = mock_image_read()
+        n4_image = mock_image_read()
+        mask_image = mock_image_read()
+        warped = mock_image_read()
+        label_map = object()
+
+        with patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct, \
+             patch("src.antspy.wrapper.ants.image_read", return_value=template_label_image), \
+             patch("src.antspy.wrapper.build_label_map", return_value=label_map), \
+             patch("src.antspy.wrapper.apply_warp", return_value=warped) as mock_apply_warp:
+            mock_ct.return_value = {
+                "BrainSegmentationN4": n4_image,
+                "BrainExtractionMask": mask_image,
+                "TemplateWarp": template_warp,
+            }
+
+            result = self.segmenter.segment_image(mock_image_read(), method="quick")
+
+        self.assertEqual(mock_apply_warp.call_count, 1)
+        args, kwargs = mock_apply_warp.call_args
+        self.assertIs(args[0], template_warp,
+                      "1st positional arg to apply_warp must be the TemplateWarp")
+        self.assertIs(args[1], template_label_image,
+                      "2nd positional arg (moving) must be the template-label "
+                      "image, not the subject-space N4 image or mask")
+        self.assertIs(args[2], n4_image,
+                      "3rd positional arg (reference) must be "
+                      "BrainSegmentationN4, not the template or the mask")
+        self.assertIsNot(
+            args[1], args[2],
+            "moving and reference must be distinct images; a "
+            "moving/reference swap that happened to pass the same object "
+            "twice must still be caught")
+        self.assertIs(kwargs.get("label_map"), label_map)
+        self.assertIs(result["segmentation"], warped)
+
+    def test_quick_builds_label_map_from_template_labels_path(self):
+        """build_label_map must be called with the template labels path --
+        the single pre-computed DKT31 labels-in-template-space file -- not
+        the per-atlas labels_dir used by the 'fusion' method or any other
+        path.
+
+        Discriminating: passing the wrong path list would still produce *a*
+        LabelMap and let segment_image return normally, so a test that only
+        checks the method succeeds would not catch it. This pins the exact
+        argument build_label_map receives.
+        """
+        fake_labels_path = self.temp_dir / "fake_template_labels.nii.gz"
+        fake_labels_path.touch()
+        self.segmenter.template_labels_path = fake_labels_path
+
+        with patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct, \
+             patch("src.antspy.wrapper.ants.image_read", return_value=mock_image_read()), \
+             patch("src.antspy.wrapper.build_label_map", return_value=object()) as mock_build_label_map, \
+             patch("src.antspy.wrapper.apply_warp", return_value=mock_image_read()):
+            mock_ct.return_value = {
+                "BrainSegmentationN4": mock_image_read(),
+                "BrainExtractionMask": mock_image_read(),
+                "TemplateWarp": object(),
+            }
+
+            self.segmenter.segment_image(mock_image_read(), method="quick")
+
+        mock_build_label_map.assert_called_once_with([fake_labels_path])
+
+    def test_quick_raises_when_template_warp_missing(self):
+        """A missing TemplateWarp must raise before apply_warp is ever
+        called, rather than letting None (or some stale value) flow into a
+        warp application.
+
+        Discriminating: a guard that checked the wrong key, or that only
+        logged a warning instead of raising, would let segment_image proceed
+        to call apply_warp with a broken warp -- which is exactly how a
+        wrongly-aligned parcellation would surface silently. This test
+        requires both the ValueError and that apply_warp was never reached.
+        """
+        fake_labels_path = self.temp_dir / "fake_template_labels.nii.gz"
+        fake_labels_path.touch()
+        self.segmenter.template_labels_path = fake_labels_path
+
+        with patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct, \
+             patch("src.antspy.wrapper.apply_warp") as mock_apply_warp:
+            mock_ct.return_value = {
+                "BrainSegmentationN4": mock_image_read(),
+                "BrainExtractionMask": mock_image_read(),
+                # TemplateWarp intentionally absent
+            }
+
+            with self.assertRaises(ValueError) as ctx:
+                self.segmenter.segment_image(mock_image_read(), method="quick")
+
+        self.assertIn("TemplateWarp", str(ctx.exception))
+        mock_apply_warp.assert_not_called()
+
     def test_device_cuda_without_gpu_raises_before_any_processing(self):
         """Constructing with device='cuda' on a GPU-less host must fail at
         construction time, before templates or images are touched.
