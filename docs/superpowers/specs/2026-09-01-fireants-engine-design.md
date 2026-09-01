@@ -180,15 +180,37 @@ reference derivative.
 
 **Label warping.** Two strategies, both required:
 
-- `genericlabel` (default) — the fused generic-label sampler, which
-  interpolates one-hot and returns argmax without materialising 97 channels.
-  **GPU-only, and requires `fused_ops` to have been built.**
-  `GridSampleDispatcher.__call__` raises `RuntimeError` when FFO is
-  unavailable, and `augment_registry_backend` force-disables FFO for any
-  CPU tensor, so this path cannot run on CPU under any configuration.
+- `genericlabel` (default) — `Image(is_segmentation=True, is_onehot=False)`,
+  which sets `interpolation_mode='genericlabel'` and routes to the fused
+  sampler. It returns argmax labels directly, shape `[1, 1, H, W, D]`, without
+  materialising 97 channels.
 - `nearest` — plain nearest-neighbour `grid_sample` on the raw label volume.
-  Runs on CPU and GPU, and reproduces the `interpolator='nearestNeighbor'`
-  behaviour of the ANTs path being replaced.
+  Reproduces the `interpolator='nearestNeighbor'` behaviour of the ANTs path
+  being replaced, and is the tier-3 control.
+
+**The `genericlabel` path silently changes shape without FFO, and the caller
+must handle it.** `fireants/io/image.py:145-147` reads:
+
+```python
+# When FFO is not available, force one-hot mode so generic-label path is never used
+if not fi.use_ffo:
+    is_onehot = True
+```
+
+So when `fused_ops` is absent — or whenever tensors are on CPU, since
+`augment_registry_backend` force-disables FFO for CPU tensors — `is_onehot` is
+forced true, `interpolation_mode` becomes `None`, and the warp returns a
+**one-hot `[1, C, H, W, D]` tensor** rather than `[1, 1, H, W, D]` labels. The
+`RuntimeError` in `GridSampleDispatcher.__call__` is therefore unreachable
+through this route: FireANTs degrades instead of failing.
+
+`warp_atlases` must detect which shape it received and argmax when the tensor
+is one-hot, rather than assuming labels. Returning a one-hot volume to
+`ants.joint_label_fusion` would be a silent, well-formed disaster. The active
+path is logged at INFO on every run so the mode is visible in job logs.
+
+CPU is therefore usable for tests, at C× the memory (97 channels; trivial on
+the small synthetic volumes tier 1 uses, prohibitive at 256³).
 
 `genericlabel` is generally the better choice, but it is a real source of Dice
 difference against the reference derivative and must not be mistaken for a
@@ -196,8 +218,9 @@ registration difference when reading tier-3 results. `nearest` reproduces the
 reference's method exactly, which is how the two effects get separated — see
 section 9.
 
-`--device cpu --label-interpolation genericlabel` is rejected at argument
-parsing, not discovered mid-run.
+`--device cpu --label-interpolation genericlabel` is permitted and degrades to
+the one-hot path described above, with a warning logged. It is not rejected,
+because it works.
 
 ### Conversion boundary — file-based, never in-memory
 
@@ -287,7 +310,7 @@ Added to `parse_arguments` in `src/run.py` and threaded through
 |---|---|---|---|
 | `--device` | `cuda`, `cpu` | `cuda` | FireANTs compute device |
 | `--fireants-batch-size` | int | `0` (all) | Atlases per registration batch |
-| `--label-interpolation` | `genericlabel`, `nearest` | `genericlabel` | Atlas label warping. `genericlabel` requires GPU + built `fused_ops`; combining it with `--device cpu` is a parse-time error |
+| `--label-interpolation` | `genericlabel`, `nearest` | `genericlabel` | Atlas label warping. Without built `fused_ops`, or on CPU, `genericlabel` degrades to a one-hot return that `warp_atlases` argmaxes; a warning is logged |
 
 No `--engine` flag: FireANTs is the only registration backend.
 
@@ -341,10 +364,12 @@ mocks:
   `direction`, `origin` or `center` overrides (asserted on the call, since
   passing any of them rewrites the header)
 - warped labels contain only values present in the input labels — no
-  interpolated intermediates. Tier 1 runs on CPU, so this covers `nearest`
-  only; `genericlabel` cannot run on CPU and is covered in tier 2
-- `--device cpu --label-interpolation genericlabel` exits non-zero at argument
-  parsing
+  interpolated intermediates — under both `nearest` and `genericlabel`. On CPU
+  `genericlabel` exercises the degraded one-hot path, which is precisely the
+  branch most likely to be wrong
+- given a one-hot `[1, C, H, W, D]` warp result, `warp_atlases` returns
+  `[1, 1, H, W, D]` labels whose values are the original label ids, not
+  channel indices
 - `batch_size` chunking returns the same number of atlases in the same order
   as a single full batch
 - **warp direction**: with a synthetic subject and template differing by a
@@ -430,7 +455,7 @@ before declaring failure.
 | Template↔subject warp direction inverted, reproducing the 11.5 L brain-volume bug | Behavioural tier-1 direction test; `TemplateWarp` exposes a single direction rather than a list whose orientation depends on caller choice |
 | GPU OOM at full 20-atlas batch on smaller cards | `--fireants-batch-size`; default full batch only because `pi_satra` has 80 GB cards |
 | `Dockerfile` / `Singularity` drift | Version-parity test across both files |
-| `fused_ops` build fails or is skipped | Not silent: `genericlabel` raises `RuntimeError` rather than degrading. Still caught at build time — the container asserts `import fireants_fused_ops` succeeds, because the default label path is unusable without it |
+| `fused_ops` build fails or is skipped | Silent: FireANTs degrades to one-hot rather than raising, changing the return shape and costing 97× memory at 256³. Caught at build time (the container asserts `import fireants_fused_ops` imports) and at runtime (the active path is logged, and `warp_atlases` handles both shapes explicitly) |
 | Label-warping method differs (fused argmax vs nearestNeighbor), confounding tier-3 attribution | `--label-interpolation nearest` reproduces the reference's method exactly, isolating the registration change from the interpolation change without needing an ANTs engine |
 | No in-app fallback if FireANTs regresses on some subject | The delivered 38-subject derivative and its container remain on disk; rollback is redeploying that image, and the tier-3 gate blocks merge rather than discovering this in production |
 
