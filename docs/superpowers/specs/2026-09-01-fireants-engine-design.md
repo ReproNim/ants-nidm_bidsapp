@@ -239,13 +239,31 @@ pytest. A registration engine that silently returns a reoriented volume
 produces a well-formed segmentation, a well-formed `nidm.ttl`, and exit 0 —
 the failure mode this repo has already been bitten by.
 
-**Optional simplification, not adopted by default.** The container ships the
-full ANTs 2.5.4 binaries, which include `antsJointFusion`. Calling that CLI
-with the warped file paths instead of `ants.joint_label_fusion` would remove
-40 of the 42 read-backs and match the existing shell-out pattern. It is left
-out because it changes a currently-working call for an I/O saving that is
-already negligible; it is recorded here as the obvious next step if scratch
-I/O ever becomes the bottleneck.
+**Why the fusion call stays on ANTsPy.** The container ships the full ANTs
+2.5.4 binaries including `antsJointFusion`, so calling that CLI with the
+warped file paths is possible. It saves no I/O: `ants.joint_label_fusion`
+passes in-memory pointers (`myargs["g-MULTINAME-%i"] = atlas_list[k]`, then
+`process_arguments` → `get_pointer_string()` → `get_lib_fn("antsJointFusion")`),
+which is the same compiled code the CLI runs. Either way the 40 warped volumes
+are written once by FireANTs and read once — by ANTsPy in one case, by the
+binary's own ITK readers in the other.
+
+The only difference is peak RAM: the CLI keeps 40 volumes (~2.7 GB) out of the
+Python process. That is not a saving worth pursuing, because the current code
+already holds all 40 simultaneously (`warped_images.append(...)` at
+`wrapper.py:437`) — the file-based boundary matches today's memory profile
+rather than regressing it.
+
+Against that, switching would mean hand-rolling what ANTsPy already does
+correctly: the `-MULTINAME-` argument scheme, `mktemp` allocation and
+read-back for each probability image, and the flag mapping for `beta`, `rho`,
+`r_search`, `no_zeroes` and `max_lab_plus_one`. The wrapper consumes all four
+return values (`segmentation`, `intensity`, `probabilityimages`,
+`segmentation_numbers`) and `_organize_bids_output` writes the probability
+images out, so all of it would have to be reproduced. Errors there are silent:
+a wrong flag yields a segmentation, just not the right one.
+
+The fusion call therefore stays exactly as it is.
 
 ## 5. CLI
 
