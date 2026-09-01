@@ -21,16 +21,26 @@ from pathlib import Path
 import numpy as np
 
 from src.registration.handoff import (
-    assert_geometry_match,
     geometry_of,
     read_nifti,
     write_nifti,
 )
 from src.registration.labels import build_label_map
 
-# Hyperparameters from FireANTs' own scripts/pairwise/oasis.py rather than
-# invented. SyN rather than Greedy, as the closer analogue to the SyNRA being
-# replaced.
+# Hyperparameters transcribed from FireANTs itself, not invented, but from two
+# different places rather than one:
+#   - SYN_SCALES, SYN_ITERATIONS, deformation_type='compositive', and
+#     optimizer='adam' are the fixed constants in FireANTs' own
+#     scripts/pairwise/oasis.py. Everything else in that file's SyN call
+#     (learning rate, cc kernel size, smoothing sigmas) is a ray-tune search
+#     value there (config['lr'], 1 + 2*config['cc_size'], etc.), not a
+#     constant, so it is not a usable source for those.
+#   - AFFINE_SCALES, AFFINE_ITERATIONS, the affine optimizer_lr=3e-3, and
+#     CC_KERNEL_SIZE=5 come from tutorials/tutorial1_basic_usage.py.
+#   - SYN_LR = 0.5 is that same tutorial's GreedyRegistration optimizer_lr.
+#   - SMOOTH_GRAD_SIGMA = 1.0 is that same tutorial's smooth_grad_sigma=1.
+#   - SMOOTH_WARP_SIGMA = 0.5 is SyNRegistration's own documented default.
+# SyN rather than Greedy, as the closer analogue to the SyNRA being replaced.
 AFFINE_SCALES = [4, 2, 1]
 AFFINE_ITERATIONS = [200, 100, 50]
 SYN_SCALES = [4, 2, 1]
@@ -96,6 +106,12 @@ def _tensor_to_nifti(tensor, reference_itk, path):
 
     array = np.asarray(tensor)
     while array.ndim > 3:
+        if array.shape[0] != 1:
+            raise ValueError(
+                f"cannot drop leading axis of size {array.shape[0]} (expected "
+                f"1) from array with shape {array.shape}; only singleton "
+                "leading dims may be squeezed away"
+            )
         array = array[0]
     out = sitk.GetImageFromArray(array)
     out.CopyInformation(reference_itk)
@@ -133,7 +149,6 @@ def warp_atlases(
 
     Returns (warped_atlas_images, warped_label_images) as ANTsImages.
     """
-    import SimpleITK as sitk
     import torch
     from fireants.interpolator import fireants_interpolator
     from fireants.io import BatchedImages, Image
