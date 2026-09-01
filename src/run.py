@@ -234,17 +234,35 @@ def parse_arguments():
     
     parser.add_argument('--num-threads', help='Number of threads to use for processing [default: 1]',
                         type=int, default=1)
+
+    # Registration runs on FireANTs (GPU). --device cuda with no visible GPU
+    # fails before any processing rather than falling back: FireANTs on CPU is
+    # slower than the ANTs code it replaced, so a silent fallback under a BABS
+    # array yields hundreds of many-hour jobs that all exit 0.
+    parser.add_argument('--device', help='Compute device for registration [default: cuda]',
+                        choices=['cuda', 'cpu'], default='cuda')
+    parser.add_argument('--fireants-batch-size', dest='fireants_batch_size',
+                        help='Atlases registered per batch; 0 registers all at once [default: 0]',
+                        type=int, default=0)
+    # Without built fused_ops, or on CPU, genericlabel degrades to a one-hot
+    # return that warp_atlases argmaxes; see fireants/io/image.py:145-147.
+    parser.add_argument('--label-interpolation', dest='label_interpolation',
+                        help='Atlas label warping method [default: genericlabel]',
+                        choices=['genericlabel', 'nearest'], default='genericlabel')
+
     parser.add_argument('-v', '--verbose', help='Verbose output',
                         action='store_true')
     parser.add_argument('--version', action='version',
                         version=f'ANTs BIDS App v{APP_VERSION}')
-    
+
     args = parser.parse_args()
-    
+
     # Validate arguments
     if args.skip_ants and not args.ants_input:
         parser.error("--skip-ants requires --ants-input to specify existing ANTs derivatives")
-    
+    if args.fireants_batch_size < 0:
+        parser.error("--fireants-batch-size must be >= 0 (0 means all atlases at once)")
+
     return args
 
 def initialize(args):
@@ -296,7 +314,10 @@ def initialize(args):
             modality=args.modality,
             prob_threshold=args.prob_threshold,
             num_threads=args.num_threads,
-            verbose=args.verbose
+            verbose=args.verbose,
+            device=args.device,
+            fireants_batch_size=args.fireants_batch_size,
+            label_interpolation=args.label_interpolation
         )
 
     return layout, segmenter, derivatives_dir, nidm_input_dir

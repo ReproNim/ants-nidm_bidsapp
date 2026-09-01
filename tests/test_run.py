@@ -240,6 +240,9 @@ class TestRun(unittest.TestCase):
                 self.verbose = True
                 self.skip_bids_validation = True
                 self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 0
+                self.label_interpolation = "genericlabel"
         
         args = Args(self)
         
@@ -361,6 +364,9 @@ class TestRun(unittest.TestCase):
                 self.verbose = True
                 self.skip_bids_validation = True
                 self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 0
+                self.label_interpolation = "genericlabel"
         
         args = Args(self)
         
@@ -556,6 +562,58 @@ class TestRun(unittest.TestCase):
         (sess / "nidm.ttl").write_text("")
         self.assertEqual(find_nidm_input_file(nidm_in, "02", "baseline"),
                          sess / "nidm.ttl")
+
+    def test_device_defaults_to_cuda(self):
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        argv = ["ants-nidm", "/bids", "/out", "participant"]
+        with patch.object(sys, "argv", argv):
+            args = parse_arguments()
+        self.assertEqual(args.device, "cuda")
+        self.assertEqual(args.fireants_batch_size, 0)
+        self.assertEqual(args.label_interpolation, "genericlabel")
+
+    def test_device_and_engine_options_are_parsed(self):
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        argv = [
+            "ants-nidm", "/bids", "/out", "participant",
+            "--device", "cpu",
+            "--fireants-batch-size", "5",
+            "--label-interpolation", "nearest",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = parse_arguments()
+        self.assertEqual(args.device, "cpu")
+        self.assertEqual(args.fireants_batch_size, 5)
+        self.assertEqual(args.label_interpolation, "nearest")
+
+    def test_invalid_device_is_rejected(self):
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        argv = ["ants-nidm", "/bids", "/out", "participant", "--device", "mps"]
+        with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
+            parse_arguments()
+
+    def test_negative_batch_size_is_rejected(self):
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        argv = ["ants-nidm", "/bids", "/out", "participant",
+                "--fireants-batch-size", "-2"]
+        with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
+            parse_arguments()
 
 if __name__ == "__main__":
     unittest.main()
