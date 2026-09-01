@@ -203,31 +203,52 @@ class TestANTsSegmentation(unittest.TestCase):
                     any(f"label-{label_id}_probseg" in w for w in written),
                     f"no probseg written for label {label_id}: {written}")
 
-    def test_cortical_thickness_keeps_invtransforms_for_template_to_subject(self):
-        """TemplateToSubjectTransforms must be invtransforms of subject->template.
+    def test_cortical_thickness_returns_a_template_warp_not_transform_paths(self):
+        """The 11.5 L regression guard, restated for the new representation.
 
-        Regression test. compute_cortical_thickness registers subject -> template
-        (fixed=brain_template, moving=brain_image), so fwdtransforms maps
-        subject -> template. The 'quick' method pulls the template-space label
-        atlas into subject space with these transforms; using fwdtransforms
-        warped everything the wrong way (the original 11.5 L whole-FOV bug on
-        ABIDE sub-0051456).
+        The old assertion compared TemplateToSubjectTransforms against
+        invtransforms. That list no longer exists: the warp is a torch object
+        that is never serialised, so there is no fwd/inv attribute to pick
+        wrongly. What this test pins is that the old, footgun-shaped key is
+        gone and the single-direction object is present. The behavioural
+        direction check lives in
+        tests/test_registration.py::test_template_warp_moves_template_space_into_subject_space.
         """
-        registrations, applied, subprocesses, results = \
-            self._run_cortical_thickness_recording_calls()
+        sentinel = object()
 
-        INV = ["/fake/0GenericAffine.mat", "/fake/1InverseWarp.nii.gz"]
-        FWD = ["/fake/1Warp.nii.gz", "/fake/0GenericAffine.mat"]
-        self.assertEqual(results["TemplateToSubjectTransforms"], INV,
-                         "template->subject direction requires invtransforms")
-        self.assertNotEqual(results["TemplateToSubjectTransforms"], FWD)
+        def fake_subprocess_run(cmd, *args, **kwargs):
+            cmd = [str(c) for c in cmd]
+            # Honour antsBrainExtraction.sh's contract: create the output mask
+            # next to the -o prefix, on disk, so the wrapper's own mask.exists()
+            # check passes honestly rather than via a blanket Path.exists patch
+            # (which would also paper over the template-file existence checks
+            # elsewhere in this method).
+            if any("antsBrainExtraction" in c for c in cmd) and "-o" in cmd:
+                prefix = cmd[cmd.index("-o") + 1]
+                Path(prefix + "BrainExtractionMask.nii.gz").touch()
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("src.antspy.wrapper.register_to_template", return_value=sentinel), \
+             patch("src.antspy.wrapper.ants.image_write", side_effect=lambda img, path: None), \
+             patch("src.antspy.wrapper.ants.n4_bias_field_correction",
+                   side_effect=lambda img, **k: mock_image_read()), \
+             patch("src.antspy.wrapper.shutil.which", return_value="/fake/antsBrainExtraction.sh"), \
+             patch("src.antspy.wrapper.subprocess.run", side_effect=fake_subprocess_run):
+            results = self.segmenter.compute_cortical_thickness(mock_image_read())
+
+        self.assertIs(results["TemplateWarp"], sentinel)
+        self.assertNotIn(
+            "TemplateToSubjectTransforms", results,
+            "the ANTs transform-path list must be gone, not merely unused: "
+            "leaving it invites a caller to read the wrong direction again",
+        )
 
     def _run_cortical_thickness_recording_calls(self):
         """Run compute_cortical_thickness with mocks that tag every image read
-        with its source path and record registration/apply_transforms calls
-        and the antsBrainExtraction.sh subprocess invocation.
+        with its source path and record register_to_template calls and the
+        antsBrainExtraction.sh subprocess invocation.
 
-        Returns (registrations, applied, subprocesses, results).
+        Returns (registrations, subprocesses, results).
         """
         def fake_image_read(path, *args, **kwargs):
             img = mock_image_read()
@@ -236,23 +257,13 @@ class TestANTsSegmentation(unittest.TestCase):
 
         registrations = []
 
-        def fake_registration(*args, **kwargs):
-            registrations.append(kwargs)
-            return {
-                "fwdtransforms": ["/fake/1Warp.nii.gz", "/fake/0GenericAffine.mat"],
-                "invtransforms": ["/fake/0GenericAffine.mat", "/fake/1InverseWarp.nii.gz"],
-                "warpedmovout": mock_image_read(),
-            }
-
-        applied = []
-
-        def fake_apply_transforms(*args, **kwargs):
-            applied.append(kwargs)
-            out = mock_image_read()
-            # Propagate the source tag so assertions can trace warped images
-            moving = kwargs.get("moving")
-            out.src_path = getattr(moving, "src_path", None)
-            return out
+        def fake_register_to_template(subject, template, **kwargs):
+            registrations.append({"subject": subject, "template": template, **kwargs})
+            warp = MagicMock()
+            # Propagate the source tag so assertions can trace which template
+            # file the warp was built from.
+            warp.src_path = getattr(template, "src_path", None)
+            return warp
 
         subprocesses = []
 
@@ -269,15 +280,12 @@ class TestANTsSegmentation(unittest.TestCase):
         with patch('src.antspy.wrapper.ants.image_read', side_effect=fake_image_read), \
              patch('src.antspy.wrapper.ants.image_write', side_effect=lambda img, path: None), \
              patch('src.antspy.wrapper.ants.n4_bias_field_correction', side_effect=lambda img, **k: mock_image_read()), \
-             patch('src.antspy.wrapper.ants.registration', side_effect=fake_registration), \
-             patch('src.antspy.wrapper.ants.apply_transforms', side_effect=fake_apply_transforms), \
-             patch('src.antspy.wrapper.ants.threshold_image', side_effect=lambda img, *a, **k: img), \
-             patch('src.antspy.wrapper.ants.iMath', side_effect=lambda img, *a, **k: img), \
+             patch('src.antspy.wrapper.register_to_template', side_effect=fake_register_to_template), \
              patch('src.antspy.wrapper.subprocess.run', side_effect=fake_subprocess_run), \
              patch('src.antspy.wrapper.shutil.which', return_value='/opt/ants/bin/antsBrainExtraction.sh'):
             results = self.segmenter.compute_cortical_thickness(mock_image_read())
 
-        return registrations, applied, subprocesses, results
+        return registrations, subprocesses, results
 
     def test_brain_extraction_runs_canonical_ants_script(self):
         """Brain extraction must be antsBrainExtraction.sh, not a hand-rolled copy.
@@ -292,7 +300,7 @@ class TestANTsSegmentation(unittest.TestCase):
           -e whole-head template, -m brain probability mask,
           -f extraction (registration-scope) mask.
         """
-        registrations, applied, subprocesses, results = \
+        registrations, subprocesses, results = \
             self._run_cortical_thickness_recording_calls()
 
         abe = [c for c in subprocesses if any("antsBrainExtraction" in a for a in c)]
@@ -342,23 +350,22 @@ class TestANTsSegmentation(unittest.TestCase):
                       "the script's own output must be in the error message")
 
     def test_refinement_registrations_target_brain_only_template(self):
-        """Subject->template registrations must target the brain-only template.
+        """register_to_template must target the brain-only template.
 
-        These run on the skull-stripped image (to produce the template-to-
-        subject transforms the 'quick' method needs), so the fixed image must
+        This registers the skull-stripped subject image (to produce the
+        TemplateWarp the 'quick' method needs), so the template argument must
         be T_template0_BrainCerebellum. Registering a brain-only image onto
         the whole-head T_template0 biases the affine to scale the brain
         toward the head outline.
         """
-        registrations, applied, subprocesses, results = \
+        registrations, subprocesses, results = \
             self._run_cortical_thickness_recording_calls()
 
-        self.assertGreaterEqual(len(registrations), 2)
-        for i, reg in enumerate(registrations):
-            fixed_src = reg["fixed"].src_path
-            self.assertIn(
-                "BrainCerebellum", fixed_src,
-                f"registration #{i} must target the brain-only template, got {fixed_src}")
+        self.assertEqual(len(registrations), 1)
+        template_src = registrations[0]["template"].src_path
+        self.assertIn(
+            "BrainCerebellum", template_src,
+            f"register_to_template must target the brain-only template, got {template_src}")
 
     def test_organize_bids_output_with_session(self):
         """Test organizing outputs in BIDS format with session"""

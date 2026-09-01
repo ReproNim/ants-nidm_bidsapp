@@ -13,7 +13,7 @@ from pathlib import Path
 import glob
 from natsort import natsorted
 
-from src.registration import apply_warp, register_to_template, warp_atlases
+from src.registration import apply_warp, build_label_map, register_to_template, warp_atlases
 from src.registration.device import resolve_device
 
 class ANTsSegmentation:
@@ -375,23 +375,21 @@ class ANTsSegmentation:
             if not self.template_labels_path.exists():
                 raise ValueError(f"Template labels not found: {self.template_labels_path}")
                 
-            template_labels = ants.image_read(str(self.template_labels_path))
-            
-            # Apply template-to-subject transforms to the label atlas. As above,
-            # whichtoinvert is left unset so ANTsPy infers it from the transform
-            # shapes; the previous code hardcoded False for every element, which
-            # is wrong for the affine in an invtransforms list.
-            transformlist = thickness_results.get('TemplateToSubjectTransforms') or []
-            if not transformlist:
+            template_warp = thickness_results.get('TemplateWarp')
+            if template_warp is None:
                 raise ValueError("No transforms available for template-to-subject mapping")
 
-            warped_labels = ants.apply_transforms(
-                fixed=thickness_results['BrainSegmentationN4'],
-                moving=template_labels,
-                transformlist=transformlist,
-                interpolator='nearestNeighbor'
+            label_map = build_label_map([self.template_labels_path])
+            warped_labels = apply_warp(
+                template_warp,
+                ants.image_read(str(self.template_labels_path)),
+                thickness_results['BrainSegmentationN4'],
+                temp_dir=self.temp_dir,
+                interpolation=self.label_interpolation,
+                label_map=label_map,
+                logger=self.logger,
             )
-            
+
             return {
                 'segmentation': warped_labels,
                 'BrainSegmentationN4': thickness_results['BrainSegmentationN4'],
@@ -798,73 +796,33 @@ class ANTsSegmentation:
 
         brain_image = n4_image * final_mask
 
-        reg_template = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellum.nii.gz'))
-        
         # Register to the brain-only template. brain_image is skull-stripped at
-        # this point, so the fixed image must be skull-stripped too
-        # (T_template0_BrainCerebellum, already loaded above as reg_template).
-        # Registering it onto the whole-head T_template0 biased the affine
-        # toward scaling the brain up to the head outline, inflating every
+        # this point, so the fixed image must be skull-stripped too.
+        # Registering onto the whole-head T_template0 biased the affine toward
+        # scaling the brain up to the head outline, inflating every
         # template-space image warped back with these transforms.
-        self.logger.info("Registering to template")
-        brain_template = reg_template
+        brain_template = ants.image_read(
+            str(self.template_dir / 'T_template0_BrainCerebellum.nii.gz'))
 
-        try:
-            # First try affine registration
-            affine_reg = ants.registration(
-                fixed=brain_template,
-                moving=brain_image,
-                type_of_transform='Affine',
-                aff_metric='mattes',
-                aff_sampling=32,
-                reg_iterations=[100, 100, 100],
-                verbose=True,
-                random_seed=1
-            )
-            
-            # Then try SyN registration starting from affine
-            reg = ants.registration(
-                fixed=brain_template,
-                moving=brain_image,
-                type_of_transform='SyN',
-                initial_transform=affine_reg['fwdtransforms'][0],
-                aff_metric='mattes',
-                syn_metric='mattes',
-                reg_iterations=[100, 70, 50, 20],
-                verbose=True,
-                random_seed=1
-            )
-            
-            # These registrations are subject -> template (fixed=brain_template,
-            # moving=brain_image), so fwdtransforms maps subject -> template.
-            # Everything downstream needs the opposite direction -- pulling
-            # template-space images (the brain probability mask, and the label atlas in
-            # the 'quick' method) into subject space -- which is invtransforms:
-            # "invtransforms: Transforms to move from fixed to moving image".
-            #
-            # Using fwdtransforms here yielded a mask covering the entire FOV, so
-            # joint label fusion labelled air, skull and neck: 100% of voxels
-            # labelled, no background at all, label 4 alone taking 69.6% of the
-            # image, and an 11.5 L "brain volume" on ABIDE sub-0051456. The
-            # initial-mask call above was always correct; only this one was not.
-            transforms = list(reg['invtransforms'])
+        self.logger.info("Registering to template (FireANTs)")
+        # register_to_template sets fixed=subject, moving=template, so the
+        # returned warp already points template -> subject: the direction every
+        # consumer needs. There is no fwd/inv pair to choose between, which is
+        # what previously produced an 11.5 L brain volume on ABIDE sub-0051456.
+        template_warp = register_to_template(
+            brain_image,
+            brain_template,
+            temp_dir=self.temp_dir,
+            device=self.device,
+            logger=self.logger,
+        )
 
-        except Exception as e:
-            self.logger.warning(f"SyN registration failed: {str(e)}")
-            self.logger.info("Using affine registration only")
-            transforms = list(affine_reg['invtransforms'])
-
-        # Prepare results dictionary. BrainExtractionMask is the canonical
-        # script's product, untouched: its Atropos refinement and morphology
-        # already finalized it.
+        # BrainExtractionMask is the canonical script's product, untouched: its
+        # Atropos refinement and morphology already finalized it.
         results = {
             'BrainSegmentationN4': n4_image,
-            'BrainExtractionMask': final_mask
+            'BrainExtractionMask': final_mask,
+            'TemplateWarp': template_warp,
         }
-        
-        # Template -> subject transforms, kept as the ordered list ANTsPy
-        # returned. Consumers pass it to apply_transforms verbatim rather than
-        # rebuilding it element by element.
-        results['TemplateToSubjectTransforms'] = transforms
 
         return results
