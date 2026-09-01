@@ -325,3 +325,150 @@ def folding_fraction(registration, fixed_batch, moving_batch):
     jac = jacobian(warp).permute(0, 2, 3, 4, 1, 5)[:, 1:-1, 1:-1, 1:-1, :]
     det = torch.linalg.det(jac).reshape(-1)
     return float((det <= 0).float().mean().item())
+
+
+class TemplateWarp:
+    """A subject<->template registration, exposed in one direction only.
+
+    Consumers pull template-space images into subject space -- the brain
+    probability mask, and the DKT31 label atlas under --method quick. That is
+    the only direction exposed. It replaces the previous
+    `TemplateToSubjectTransforms`, a list of ANTs transform file paths whose
+    orientation depended on whether the caller read fwdtransforms or
+    invtransforms; reading the wrong one produced an 11.5 L brain volume
+    (wrapper.py:839-851).
+
+    Held as torch tensors. Never serialised to ANTs transform format, which is
+    why the composition-order and inversion round trip through disk does not
+    exist in this design.
+    """
+
+    def __init__(self, registration, subject_batch, template_batch, reference_itk, device):
+        self._registration = registration
+        self._subject_batch = subject_batch
+        self._template_batch = template_batch
+        self.reference_itk = reference_itk
+        self.device = device
+
+    def warp_parameters(self):
+        """Coordinates that map template-space samples into subject space."""
+        return self._registration.get_warp_parameters(
+            self._subject_batch, self._template_batch
+        )
+
+
+def register_to_template(subject, template, *, temp_dir, device="cuda", logger=None):
+    """Register `subject` to `template`, returning a template->subject warp.
+
+    `subject` is the skull-stripped brain; `template` is
+    T_template0_BrainCerebellum. Registering onto the whole-head T_template0
+    biased the affine toward scaling the brain up to the head outline
+    (wrapper.py:804-812) -- pass the brain-only template.
+    """
+    from fireants.io import BatchedImages, Image
+    from fireants.registration.affine import AffineRegistration
+    from fireants.registration.syn import SyNRegistration
+
+    log = logger or logging.getLogger("ants-nidm.registration")
+    temp_dir = Path(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    subject_path = write_nifti(subject, temp_dir / "tpl_subject.nii.gz")
+    template_path = write_nifti(template, temp_dir / "tpl_template.nii.gz")
+
+    # fixed = subject, moving = template. The registration is set up in the
+    # direction we need to *apply*, so no inversion is ever required.
+    fixed = Image.load_file(str(subject_path), device=device)
+    moving = Image.load_file(str(template_path), device=device)
+    fixed_batch, moving_batch = BatchedImages([fixed]), BatchedImages([moving])
+
+    log.info("Template registration (affine)")
+    affine = AffineRegistration(
+        AFFINE_SCALES,
+        AFFINE_ITERATIONS,
+        fixed_batch,
+        moving_batch,
+        optimizer="Adam",
+        optimizer_lr=3e-3,
+        cc_kernel_size=CC_KERNEL_SIZE,
+    )
+    affine.optimize()
+
+    log.info("Template registration (SyN)")
+    syn = SyNRegistration(
+        SYN_SCALES,
+        SYN_ITERATIONS,
+        fixed_batch,
+        moving_batch,
+        deformation_type="compositive",
+        optimizer="Adam",
+        optimizer_lr=SYN_LR,
+        cc_kernel_size=CC_KERNEL_SIZE,
+        smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
+        smooth_warp_sigma=SMOOTH_WARP_SIGMA,
+        init_affine=affine.get_affine_matrix().detach(),
+    )
+    syn.optimize()
+
+    return TemplateWarp(syn, fixed_batch, moving_batch, fixed.itk_image, device)
+
+
+def apply_warp(
+    warp,
+    moving,
+    reference,
+    *,
+    temp_dir,
+    interpolation="genericlabel",
+    label_map=None,
+    logger=None,
+):
+    """Pull a template-space image into subject space.
+
+    `interpolation='nearest'` warps raw intensities; 'genericlabel' treats the
+    input as a label volume and requires `label_map`.
+    """
+    from fireants.interpolator import fireants_interpolator
+    from fireants.io import BatchedImages, Image
+
+    log = logger or logging.getLogger("ants-nidm.registration")
+    temp_dir = Path(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    reference_geom = geometry_of(reference)
+
+    moving_path = write_nifti(moving, temp_dir / "apply_moving.nii.gz")
+    coords = warp.warp_parameters()
+
+    if interpolation == "genericlabel":
+        if label_map is None:
+            raise ValueError("interpolation='genericlabel' requires label_map")
+        img = Image.load_file(
+            str(moving_path),
+            device=warp.device,
+            is_segmentation=True,
+            background_seg_label=-1,
+            max_seg_label=label_map.max_index,
+            seg_preprocessor=_seg_preprocessor(label_map),
+        )
+        result = fireants_interpolator(
+            BatchedImages([img])(),
+            **coords,
+            mode=img.interpolation_mode or "bilinear",
+            align_corners=True,
+        )
+        array = labels_from_warp_result(result, label_map).astype(np.float32)
+    elif interpolation == "nearest":
+        img = Image.load_file(str(moving_path), device=warp.device)
+        result = fireants_interpolator(
+            BatchedImages([img])(), **coords, mode="nearest", align_corners=True
+        )
+        array = result.detach().cpu().numpy()
+    else:
+        raise ValueError(
+            f"unknown interpolation {interpolation!r}; "
+            "expected 'genericlabel' or 'nearest'"
+        )
+
+    out_path = _tensor_to_nifti(array, warp.reference_itk, temp_dir / "applied.nii.gz")
+    log.info("Applied template->subject warp (%s)", interpolation)
+    return read_nifti(out_path, expect=reference_geom, context="apply_warp result")

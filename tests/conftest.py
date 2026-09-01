@@ -35,3 +35,42 @@ _real_nibabel = __import__("nibabel")
 @pytest.fixture(autouse=True)
 def _restore_real_nibabel():
     sys.modules['nibabel'] = _real_nibabel
+
+
+# Same leak, same mechanism, different module: tests/test_run.py and
+# tests/test_wrapper.py both do `sys.modules['ants'] = MagicMock()` at module
+# level and never restore it. src/registration/handoff.py's write_nifti/
+# read_nifti do a lazy `import ants` inside the function body, so once
+# tests/test_registration.py started doing real ants.image_read/image_write
+# I/O (Task 5's register_to_template/apply_warp tests), that lazy import
+# silently resolved to the leaked mock: ants.image_write became a no-op, and
+# the NIfTI file FireANTs expected to read next was never written.
+#
+# Unlike nibabel, this cannot be a blanket autouse fixture:
+# tests/test_wrapper.py's own test_load_image legitimately needs the mock to
+# stay installed during its own run, because src/antspy/wrapper.py's
+# load_image() resolves `ants` lazily too, via
+# `importlib.import_module("ants")` at call time -- restoring the real module
+# unconditionally for every test breaks that test the same way the leak broke
+# ours. So this is opt-in: captured here (before any test file's
+# collection-time code can replace it, same as _real_nibabel above), restored
+# only for the duration of a test that requests it, and put back afterward so
+# later tests that depend on the mock are unaffected.
+try:
+    _real_ants = __import__("ants")
+except ImportError:
+    _real_ants = None
+
+
+@pytest.fixture
+def restore_real_ants():
+    if _real_ants is None:
+        yield
+        return
+    previous = sys.modules.get('ants')
+    sys.modules['ants'] = _real_ants
+    try:
+        yield
+    finally:
+        if previous is not None:
+            sys.modules['ants'] = previous
