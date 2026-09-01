@@ -13,7 +13,7 @@ OASIS-TRT-20 atlas to the target brain
 dominates per-subject cost and sets the ceiling on how fast a BABS array can
 clear a site.
 
-[FireANTs](https://github.com/rohitrango/FireANTs) (v1.5.1) performs
+[FireANTs](https://github.com/rohitrango/FireANTs) (v1.5.0) performs
 diffeomorphic registration on GPU with Riemannian adaptive optimisation,
 reporting ~250 ms per image pair and supporting batched registration of many
 moving images against one fixed image. That maps exactly onto the shape of the
@@ -367,7 +367,7 @@ One image, per decision in brainstorming. Both `Dockerfile` and `Singularity`
 gain, on top of the existing ANTs 2.5.4 payload and `antspyx`:
 
 - CUDA-enabled `torch>=2.3.0`
-- `fireants==1.5.1`
+- `fireants==1.5.0`
 - the `fused_ops` CUDA extension, built from source
   (`cd fused_ops && python setup.py build_ext && python setup.py install`).
   `pip install fireants` alone does **not** provide `fireants_fused_ops`, and

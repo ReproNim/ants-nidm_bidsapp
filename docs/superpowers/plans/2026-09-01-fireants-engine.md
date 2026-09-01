@@ -6,14 +6,14 @@
 
 **Architecture:** A new `src/registration/` package owns all registration. Images cross between ANTsPy and FireANTs exclusively as NIfTI files on `TMPDIR` — no in-memory array conversion — guarded by an explicit geometry check on every crossing. `wrapper.py`'s twenty-atlas registration loop collapses to one `warp_atlases()` call; the subject↔template registration becomes a `TemplateWarp` object that never leaves memory and never serialises to ANTs transform format.
 
-**Tech Stack:** Python 3.10, FireANTs 1.5.1, PyTorch ≥2.3.0 (CUDA in container, CPU in CI), ANTsPy (`antspyx`), ANTs 2.5.4 binaries, nibabel, pytest, Apptainer/Docker, BABS/SLURM.
+**Tech Stack:** Python 3.10, FireANTs 1.5.0, PyTorch ≥2.3.0 (CUDA in container, CPU in CI), ANTsPy (`antspyx`), ANTs 2.5.4 binaries, nibabel, pytest, Apptainer/Docker, BABS/SLURM.
 
 **Spec:** [`docs/superpowers/specs/2026-09-01-fireants-engine-design.md`](../specs/2026-09-01-fireants-engine-design.md)
 
 ## Global Constraints
 
 - **Branch:** `fireants-engine`, already created off `main`.
-- **FireANTs version:** `1.5.1`. **PyTorch:** `>=2.3.0`. **ANTs binaries:** `2.5.4` (unchanged).
+- **FireANTs version:** `1.5.0`. **PyTorch:** `>=2.3.0`. **ANTs binaries:** `2.5.4` (unchanged).
 - **Never pass `orientation`, `spacing`, `direction`, `origin`, or `center` to `fireants.io.Image`.** `orientation` applies `sitk.DICOMOrient` and rewrites the header; the others override geometry read from the file. All must be left unset.
 - **No in-memory ANTsImage↔FireANTs conversion.** Every crossing is a NIfTI file under `self.temp_dir`. Anything that pulls `.numpy()` off an ANTsImage and rebuilds a header on the other side is a plan violation.
 - **`assert_geometry_match` runs in production, not only under pytest.**
@@ -651,7 +651,7 @@ Create `requirements-test.txt`:
 # wheels for tests that run on 16^3 volumes.
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.3.0
-fireants==1.5.1
+fireants==1.5.0
 SimpleITK>=2.2.1
 ```
 
@@ -1902,7 +1902,7 @@ image is read."
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: a container with CUDA torch, `fireants==1.5.1`, and a built `fused_ops`.
+- Produces: a container with CUDA torch, `fireants==1.5.0`, and a built `fused_ops`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1978,7 +1978,7 @@ Append to `requirements.txt`:
 # Registration runs on FireANTs (GPU). torch is installed separately in the
 # container with a CUDA index URL; the CPU wheel used by CI lives in
 # requirements-test.txt.
-fireants==1.5.1
+fireants==1.5.0
 SimpleITK>=2.2.1
 ```
 
@@ -1992,14 +1992,14 @@ After the existing `pip3 install` block, insert:
 RUN pip3 install --no-cache-dir \
         --extra-index-url https://download.pytorch.org/whl/cu121 \
         "torch>=2.3.0" && \
-    pip3 install --no-cache-dir fireants==1.5.1 SimpleITK>=2.2.1
+    pip3 install --no-cache-dir fireants==1.5.0 SimpleITK>=2.2.1
 
 # The fused CUDA ops are NOT included by `pip install fireants` and must be
 # built from source. Without them FireANTs does not fail -- it forces
 # is_onehot=True (fireants/io/image.py:145-147) and silently returns a one-hot
 # volume costing 97x the memory. Assert the extension imports so a broken build
 # is caught here rather than in a BABS array.
-RUN git clone --depth 1 --branch v1.5.1 https://github.com/rohitrango/FireANTs.git /tmp/fireants-src && \
+RUN git clone --depth 1 --branch v1.5.0 https://github.com/rohitrango/FireANTs.git /tmp/fireants-src && \
     cd /tmp/fireants-src/fused_ops && \
     python3 setup.py build_ext && \
     python3 setup.py install && \
