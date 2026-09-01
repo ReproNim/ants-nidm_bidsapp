@@ -108,7 +108,7 @@ def warp_atlases(
     *,
     device: str = "cuda",
     batch_size: int = 0,            # 0 = all atlases in one batch
-    label_interpolation: str = "onehot",   # or "nearest"
+    label_interpolation: str = "genericlabel",   # or "nearest"
 ) -> tuple[list["ants.ANTsImage"], list["ants.ANTsImage"]]:
     """Return (warped atlas images, warped atlas labels) in target space."""
 ```
@@ -136,7 +136,7 @@ def apply_warp(
     moving: "ants.ANTsImage",
     reference: "ants.ANTsImage",
     *,
-    interpolation: str = "onehot",
+    interpolation: str = "genericlabel",
 ) -> "ants.ANTsImage":
     ...
 ```
@@ -178,13 +178,26 @@ reference derivative.
 `BatchedImages`. `batch_size` allows chunking on smaller cards. On `pi_satra`
 (A100 80 GB / H100) full batch is the target configuration.
 
-**Label warping.** Default `label_interpolation="onehot"` uses the fused
-generic-label sampler, which interpolates one-hot and returns argmax without
-materialising 97 channels. The replaced ANTs path used `nearestNeighbor`;
-one-hot is generally the better choice, but it is a real source of Dice
+**Label warping.** Two strategies, both required:
+
+- `genericlabel` (default) — the fused generic-label sampler, which
+  interpolates one-hot and returns argmax without materialising 97 channels.
+  **GPU-only, and requires `fused_ops` to have been built.**
+  `GridSampleDispatcher.__call__` raises `RuntimeError` when FFO is
+  unavailable, and `augment_registry_backend` force-disables FFO for any
+  CPU tensor, so this path cannot run on CPU under any configuration.
+- `nearest` — plain nearest-neighbour `grid_sample` on the raw label volume.
+  Runs on CPU and GPU, and reproduces the `interpolator='nearestNeighbor'`
+  behaviour of the ANTs path being replaced.
+
+`genericlabel` is generally the better choice, but it is a real source of Dice
 difference against the reference derivative and must not be mistaken for a
-registration difference when reading tier-3 results. `"nearest"` is retained
-precisely so the two effects can be separated — see section 9.
+registration difference when reading tier-3 results. `nearest` reproduces the
+reference's method exactly, which is how the two effects get separated — see
+section 9.
+
+`--device cpu --label-interpolation genericlabel` is rejected at argument
+parsing, not discovered mid-run.
 
 ### Conversion boundary — file-based, never in-memory
 
@@ -274,7 +287,7 @@ Added to `parse_arguments` in `src/run.py` and threaded through
 |---|---|---|---|
 | `--device` | `cuda`, `cpu` | `cuda` | FireANTs compute device |
 | `--fireants-batch-size` | int | `0` (all) | Atlases per registration batch |
-| `--label-interpolation` | `onehot`, `nearest` | `onehot` | Atlas label warping method |
+| `--label-interpolation` | `genericlabel`, `nearest` | `genericlabel` | Atlas label warping. `genericlabel` requires GPU + built `fused_ops`; combining it with `--device cpu` is a parse-time error |
 
 No `--engine` flag: FireANTs is the only registration backend.
 
@@ -328,7 +341,10 @@ mocks:
   `direction`, `origin` or `center` overrides (asserted on the call, since
   passing any of them rewrites the header)
 - warped labels contain only values present in the input labels — no
-  interpolated intermediates, under both `onehot` and `nearest`
+  interpolated intermediates. Tier 1 runs on CPU, so this covers `nearest`
+  only; `genericlabel` cannot run on CPU and is covered in tier 2
+- `--device cpu --label-interpolation genericlabel` exits non-zero at argument
+  parsing
 - `batch_size` chunking returns the same number of atlases in the same order
   as a single full batch
 - **warp direction**: with a synthetic subject and template differing by a
@@ -414,8 +430,8 @@ before declaring failure.
 | Template↔subject warp direction inverted, reproducing the 11.5 L brain-volume bug | Behavioural tier-1 direction test; `TemplateWarp` exposes a single direction rather than a list whose orientation depends on caller choice |
 | GPU OOM at full 20-atlas batch on smaller cards | `--fireants-batch-size`; default full batch only because `pi_satra` has 80 GB cards |
 | `Dockerfile` / `Singularity` drift | Version-parity test across both files |
-| `fused_ops` build fails or is skipped, silently disabling the generic-label sampler | Container build asserts `import fireants_fused_ops` succeeds |
-| Label-warping method differs (one-hot argmax vs nearestNeighbor), confounding tier-3 attribution | `--label-interpolation nearest` reproduces the reference's method, isolating the registration change from the interpolation change without needing an ANTs engine |
+| `fused_ops` build fails or is skipped | Not silent: `genericlabel` raises `RuntimeError` rather than degrading. Still caught at build time — the container asserts `import fireants_fused_ops` succeeds, because the default label path is unusable without it |
+| Label-warping method differs (fused argmax vs nearestNeighbor), confounding tier-3 attribution | `--label-interpolation nearest` reproduces the reference's method exactly, isolating the registration change from the interpolation change without needing an ANTs engine |
 | No in-app fallback if FireANTs regresses on some subject | The delivered 38-subject derivative and its container remain on disk; rollback is redeploying that image, and the tier-3 gate blocks merge rather than discovering this in production |
 
 ## 10. Deliverables
