@@ -209,8 +209,38 @@ is one-hot, rather than assuming labels. Returning a one-hot volume to
 `ants.joint_label_fusion` would be a silent, well-formed disaster. The active
 path is logged at INFO on every run so the mode is visible in job logs.
 
-CPU is therefore usable for tests, at C× the memory (97 channels; trivial on
-the small synthetic volumes tier 1 uses, prohibitive at 256³).
+**Labels must be remapped to a contiguous range before warping.**
+`utils/imageutils.integer_to_onehot` allocates `max_label + 1` channels:
+
+```python
+if max_label is None:
+    max_label = image.max()
+...
+onehot = torch.zeros((num_labels, *image.shape), ...)
+for i in range(max_label+1):
+```
+
+DKT31 label ids are sparse — 4, 11, 15, 30, then 1001–1035 and 2001–2035 — so
+`max_label` is 2035 and the allocation is **2036 channels, not 97**. At 256³
+float32 that is roughly 136 GB, which fails on any card. This applies to the
+`genericlabel` path too, since it also one-hots internally.
+
+`warp_atlases` therefore builds a contiguous mapping from the 97 distinct label
+ids to 0…96 (0 reserved for background), passes it through FireANTs'
+`seg_preprocessor` hook with `background_seg_label=-1` and
+`max_seg_label=96`, and inverts the mapping after argmax. With
+`background_seg_label=-1` the one-hot is built with `num_labels = max_label+1`
+and no channel is skipped, so channel *c* corresponds to remapped label *c*
+exactly — the inversion is a plain lookup. Using `background_seg_label=0`
+instead would skip a channel and shift every index by one; it must not be used.
+
+The mapping is derived from the union of label ids across all 20 atlas files,
+computed once per run, and asserted to round-trip (`inverse[forward[x]] == x`)
+before any warping.
+
+With remapping in place the one-hot fallback costs 97 channels (~6.5 GB at
+256³, workable on an 80 GB card and trivial on the small synthetic volumes tier
+1 uses) instead of 2036.
 
 `genericlabel` is generally the better choice, but it is a real source of Dice
 difference against the reference derivative and must not be mistaken for a
