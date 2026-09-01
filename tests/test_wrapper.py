@@ -38,6 +38,7 @@ mock_ants.mask_image = mock_image_read
 
 # Import after mocking
 from src.antspy.wrapper import ANTsSegmentation
+from src.registration.device import DeviceUnavailable
 
 @unittest.skipIf(IN_CI, "Skip in CI environment as it requires template directory")
 class TestANTsSegmentation(unittest.TestCase):
@@ -66,6 +67,13 @@ class TestANTsSegmentation(unittest.TestCase):
             }
             
             # Initialize segmenter
+            # device='cpu' is deliberate and load-bearing, not a default worth
+            # "helpfully" removing: these tests exercise segmentation logic on
+            # mocks and never touch a GPU, while the production default is
+            # 'cuda' (see ANTsSegmentation.__init__ and resolve_device). The
+            # cuda-without-GPU fail-fast contract itself is covered directly by
+            # test_device_cuda_without_gpu_raises_before_any_processing below
+            # and by tests/test_device.py.
             self.segmenter = ANTsSegmentation(
                 bids_dir=str(self.bids_dir),
                 output_dir=str(self.output_dir),
@@ -73,6 +81,7 @@ class TestANTsSegmentation(unittest.TestCase):
                 modality='T1w',
                 prob_threshold=0.5,
                 num_threads=1,
+                device='cpu',
                 verbose=True
             )
     
@@ -515,6 +524,34 @@ class TestANTsSegmentation(unittest.TestCase):
         self.assertEqual(kwargs["device"], "cpu")
         self.assertEqual(kwargs["batch_size"], 4)
         self.assertEqual(kwargs["label_interpolation"], "nearest")
+
+    def test_device_cuda_without_gpu_raises_before_any_processing(self):
+        """Constructing with device='cuda' on a GPU-less host must fail at
+        construction time, before templates or images are touched.
+
+        This is the fail-fast contract the whole FireANTs design depends on:
+        a BABS array has to discover a missing GPU immediately, not after N4
+        bias correction has already burned twenty minutes per job. The CUDA
+        probe is patched (not relying on this host's actual GPU state) so the
+        test is deterministic on GPU and GPU-less machines alike.
+        """
+        with patch('src.antspy.wrapper.ANTsSegmentation._load_templates') as mock_load, \
+             patch('src.registration.device._torch_cuda_available', return_value=False):
+            with self.assertRaises(DeviceUnavailable):
+                ANTsSegmentation(
+                    bids_dir=str(self.bids_dir),
+                    output_dir=str(self.output_dir),
+                    temp_dir=str(self.temp_path),
+                    modality='T1w',
+                    prob_threshold=0.5,
+                    num_threads=1,
+                    device='cuda',
+                    verbose=True
+                )
+
+        # The raise must happen before any template loading -- not merely
+        # somewhere during construction.
+        mock_load.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
