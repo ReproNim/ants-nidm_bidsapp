@@ -13,6 +13,9 @@ from pathlib import Path
 import glob
 from natsort import natsorted
 
+from src.registration import apply_warp, register_to_template, warp_atlases
+from src.registration.device import resolve_device
+
 class ANTsSegmentation:
     """
     Wrapper class for ANTs segmentation functionality using ANTsPy.
@@ -27,6 +30,9 @@ class ANTsSegmentation:
                  modality='T1w',
                  prob_threshold=0.5,
                  num_threads=1,
+                 device='cuda',
+                 fireants_batch_size=0,
+                 label_interpolation='genericlabel',
                  verbose=False):
         """Initialize ANTs segmentation.
         
@@ -44,6 +50,12 @@ class ANTsSegmentation:
             Probability threshold for binary mask creation
         num_threads : int
             Number of threads to use
+        device : str
+            Compute device for FireANTs registration ('cuda' or 'cpu')
+        fireants_batch_size : int
+            Batch size for FireANTs atlas warping (0 = all atlases in one batch)
+        label_interpolation : str
+            Interpolation mode FireANTs uses when warping atlas labels
         verbose : bool
             Whether to print detailed logs
         """
@@ -98,6 +110,13 @@ class ANTsSegmentation:
         self.modality = modality
         self.prob_threshold = prob_threshold
         self.num_threads = num_threads
+        # Registration runs on FireANTs. resolve_device raises rather than
+        # silently falling back to CPU: FireANTs on CPU is slower than the ANTs
+        # code it replaced, so a fallback under a BABS array yields hundreds of
+        # many-hour jobs that all exit 0.
+        self.device = resolve_device(device)
+        self.fireants_batch_size = fireants_batch_size
+        self.label_interpolation = label_interpolation
         self.verbose = verbose
 
         # ANTsPy takes no threads argument: every ITK filter it calls reads
@@ -404,41 +423,21 @@ class ANTsSegmentation:
             if len(T1s) != len(labels):
                 self.logger.warning(f"Number of atlas images ({len(T1s)}) does not match number of labels ({len(labels)})")
                 
-            # Load atlas images and labels
-            atlas_images = [ants.image_read(str(path)) for path in T1s]
-            atlas_labels = [ants.image_read(str(path)) for path in labels]
-            
-            # Register each atlas to the masked brain
-            warped_images = []
-            warped_labels = []
-            
-            for atlas_img, atlas_lab in zip(atlas_images, atlas_labels):
-                # Register atlas to target
-                reg = ants.registration(
-                    fixed=masked_brain,
-                    moving=atlas_img,
-                    type_of_transform='SyNRA',  # Combined rigid, affine, and SyN registration
-                    reg_iterations=[200, 200, 100],
-                    transform_parameters=(0.1, 3, 0),
-                    flow_sigma=3,
-                    total_sigma=0,
-                    aff_metric='mattes',
-                    syn_metric='mattes',
-                    verbose=True
-                )
-                
-                # Apply transforms to atlas labels
-                warped_lab = ants.apply_transforms(
-                    fixed=masked_brain,
-                    moving=atlas_lab,
-                    transformlist=reg['fwdtransforms'],
-                    interpolator='nearestNeighbor',
-                    whichtoinvert=[False] * len(reg['fwdtransforms'])
-                )
-                
-                warped_images.append(reg['warpedmovout'])
-                warped_labels.append(warped_lab)
-            
+            # Registration is FireANTs; the fusion voting below stays on ANTs.
+            # Images cross the boundary as NIfTI files under temp_dir and are
+            # geometry-checked on the way back -- see src/registration/handoff.py.
+            warped_images, warped_labels = warp_atlases(
+                masked_brain,
+                thickness_results['BrainExtractionMask'],
+                T1s,
+                labels,
+                temp_dir=self.temp_dir,
+                device=self.device,
+                batch_size=self.fireants_batch_size,
+                label_interpolation=self.label_interpolation,
+                logger=self.logger,
+            )
+
             # Perform joint label fusion
             self.logger.info(f"Running joint label fusion with {len(warped_images)} atlases")
             fusion = ants.joint_label_fusion(

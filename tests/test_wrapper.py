@@ -457,5 +457,64 @@ class TestANTsSegmentation(unittest.TestCase):
             mock_segment.assert_called_once()
             mock_save.assert_called_once()
 
+    def test_fusion_delegates_registration_to_warp_atlases(self):
+        """The twenty-atlas ants.registration loop is gone; segment_image calls
+        warp_atlases once and passes its output straight to joint_label_fusion.
+        """
+        from unittest.mock import patch
+
+        warped_imgs = [mock_image_read() for _ in range(2)]
+        warped_labs = [mock_image_read() for _ in range(2)]
+
+        with patch("src.antspy.wrapper.warp_atlases") as mock_warp, \
+             patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct, \
+             patch("src.antspy.wrapper.ants.joint_label_fusion") as mock_jlf:
+            mock_warp.return_value = (warped_imgs, warped_labs)
+            mock_ct.return_value = {
+                "BrainSegmentationN4": mock_image_read(),
+                "BrainExtractionMask": mock_image_read(),
+                "TemplateWarp": object(),
+            }
+            mock_jlf.return_value = {
+                "segmentation": mock_image_read(),
+                "intensity": mock_image_read(),
+                "probabilityimages": [],
+                "segmentation_numbers": [1],
+            }
+            self.segmenter.segment_image(mock_image_read(), method="fusion")
+
+        self.assertEqual(mock_warp.call_count, 1, "warp_atlases must be called once")
+        self.assertIs(mock_jlf.call_args.kwargs["atlas_list"], warped_imgs)
+        self.assertIs(mock_jlf.call_args.kwargs["label_list"], warped_labs)
+
+    def test_fusion_passes_engine_options_through(self):
+        from unittest.mock import patch
+
+        self.segmenter.device = "cpu"
+        self.segmenter.fireants_batch_size = 4
+        self.segmenter.label_interpolation = "nearest"
+
+        with patch("src.antspy.wrapper.warp_atlases") as mock_warp, \
+             patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct, \
+             patch("src.antspy.wrapper.ants.joint_label_fusion") as mock_jlf:
+            mock_warp.return_value = ([], [])
+            mock_ct.return_value = {
+                "BrainSegmentationN4": mock_image_read(),
+                "BrainExtractionMask": mock_image_read(),
+                "TemplateWarp": object(),
+            }
+            mock_jlf.return_value = {
+                "segmentation": mock_image_read(),
+                "intensity": mock_image_read(),
+                "probabilityimages": [],
+                "segmentation_numbers": [1],
+            }
+            self.segmenter.segment_image(mock_image_read(), method="fusion")
+
+        kwargs = mock_warp.call_args.kwargs
+        self.assertEqual(kwargs["device"], "cpu")
+        self.assertEqual(kwargs["batch_size"], 4)
+        self.assertEqual(kwargs["label_interpolation"], "nearest")
+
 if __name__ == "__main__":
-    unittest.main() 
+    unittest.main()
