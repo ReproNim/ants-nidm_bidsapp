@@ -53,28 +53,37 @@ work.
 
 ## 3. Scope
 
-FireANTs replaces the ANTs registration calls outright. There is no dual
-backend and no `--engine` flag: the ANTs registration path is deleted, not
-kept alongside. Two phases, sequenced by risk; phase 2 does not begin until
-phase 1 passes the tier-3 gate in section 8.
+FireANTs replaces every registration and transform-application call in the
+app. There is no dual backend, no `--engine` flag, and no phasing: the ANTs
+registration path is deleted, not kept alongside.
 
-**Phase 1 — the fusion registration loop.** Replace the twenty
-`ants.registration` + `ants.apply_transforms` calls at
-`wrapper.py:415-439`. This is where the compute is.
+All five sites move:
 
-**Phase 2 — the template registration in brain extraction.** Replace the
-`Affine` + `SyN` pair at `wrapper.py:815-838`. Deferred, not dropped: its
-output is `TemplateToSubjectTransforms`, a list of ANTs transform file paths
-consumed verbatim by `ants.apply_transforms` downstream. Reproducing it
-requires emitting ANTs-compatible warp and affine files with correct
-composition order and inversion. The comment block at `wrapper.py:839-851`
-records that getting this direction wrong once produced an 11.5 L brain
-volume. Attempting it after phase 1 means the round-trip conversion and the
-Jacobian gate are already validated.
+| `wrapper.py` | Call | Purpose |
+|---|---|---|
+| 417 | `ants.registration` (`SyNRA`) ×20 | atlas → target, fusion loop |
+| 431 | `ants.apply_transforms` | atlas labels → target |
+| 815 | `ants.registration` (`Affine`) | subject → template |
+| 827 | `ants.registration` (`SyN`) | subject → template |
+| 369 | `ants.apply_transforms` | template labels → subject (`quick`) |
 
-**Out of scope:** N4, brain extraction, Atropos, fusion voting, the NIDM
-submodule, the multi-run T1w glob blocker tracked separately, and any change
-to output layout.
+Moving all of them together is safer than splitting them, not riskier. The
+`TemplateToSubjectTransforms` producer (`wrapper.py:869`) and its sole
+consumer (`wrapper.py:365`) are both inside `wrapper.py`. If only the producer
+moved, FireANTs would have to emit ANTs-compatible warp and affine files with
+correct composition order and inversion so `ants.apply_transforms` could read
+them back — the exact serialisation round-trip that the comment block at
+`wrapper.py:839-851` records getting wrong once, producing an 11.5 L brain
+volume. Moving both ends keeps the transform as an in-memory warp that is
+never serialised to ANTs format at all.
+
+**What remains on ANTs**, because FireANTs has no implementation (section 2):
+N4 bias correction, `antsBrainExtraction.sh`, `ants.joint_label_fusion`
+voting, and `ants.image_read` / `image_write` for I/O. The container therefore
+keeps ANTs 2.5.4 and `antspyx`.
+
+**Out of scope:** the NIDM submodule, the multi-run T1w glob blocker tracked
+separately, and any change to output layout.
 
 ## 4. Architecture
 
@@ -83,8 +92,9 @@ extract the seam into a new module:
 
 ```
 src/registration/
-    __init__.py    # warp_atlases(...) — the only public entry point
+    __init__.py    # public API: warp_atlases, register_to_template, apply_warp
     fireants.py    # FireANTs implementation
+    convert.py     # ANTsImage <-> FireANTs Image conversion
 ```
 
 ### Interface
@@ -108,6 +118,44 @@ unchanged. The fusion loop in `segment_image` collapses to a single
 `warp_atlases(...)` call. The module is separate from `wrapper.py` for
 testability and to keep an already-large file from growing, not to support a
 second backend.
+
+Two further entry points replace the template-registration sites:
+
+```python
+def register_to_template(
+    subject: "ants.ANTsImage",      # brain_image, skull-stripped
+    template: "ants.ANTsImage",     # T_template0_BrainCerebellum
+    *,
+    device: str = "cuda",
+) -> "TemplateWarp":
+    """Register subject -> template. The returned object carries the
+    template -> subject direction, matching what consumers need."""
+
+def apply_warp(
+    warp: "TemplateWarp",
+    moving: "ants.ANTsImage",
+    reference: "ants.ANTsImage",
+    *,
+    interpolation: str = "onehot",
+) -> "ants.ANTsImage":
+    ...
+```
+
+`TemplateWarp` is an in-memory object holding the composed affine and
+displacement field as torch tensors. It replaces
+`thickness_results['TemplateToSubjectTransforms']`, which today is a list of
+ANTs transform *file paths*. Because both the producer and the consumer move
+in the same change, the warp is never written to disk in ANTs format and the
+`whichtoinvert` inference that `ants.apply_transforms` performs disappears
+along with it.
+
+**Direction is the load-bearing detail.** `register_to_template` registers
+subject → template but exposes the template → subject direction, because every
+consumer pulls template-space images into subject space. `wrapper.py:839-851`
+documents an 11.5 L brain volume caused by getting exactly this backwards.
+`TemplateWarp` therefore exposes one direction only, rather than a
+transform list whose orientation depends on which attribute the caller
+picked.
 
 ### Registration
 
@@ -168,8 +216,8 @@ and a silent fallback inside a BABS array turns a fast job into a many-hour
 one while still exiting 0. `--device cpu` remains available as an explicit
 opt-in for tests and small debugging runs.
 
-Phase 1 touches only the fusion loop, so `--method quick` still runs without a
-GPU. That changes in phase 2, when the template registration also moves.
+Both `--method fusion` and `--method quick` now require a GPU, since the
+template registration moves along with the fusion loop.
 
 Rollback, if it is ever needed, is the previously delivered container plus the
 existing 38-subject derivative on disk — not a runtime flag.
@@ -208,10 +256,21 @@ mocks:
   interpolated intermediates, under both `onehot` and `nearest`
 - `batch_size` chunking returns the same number of atlases in the same order
   as a single full batch
+- **warp direction**: with a synthetic subject and template differing by a
+  known translation, a marker placed in template space lands at the predicted
+  subject-space voxel after `apply_warp`. This replaces
+  `tests/test_wrapper.py:198-214`, which asserts
+  `TemplateToSubjectTransforms == invtransforms`. That assertion is structural
+  and cannot survive the representation change, but the bug it guards — the
+  11.5 L brain volume from an inverted template↔subject mapping — is the most
+  consequential regression in this repo's history. The replacement must be
+  behavioural and must fail if the direction is flipped.
 
 **Tier 2 — one GPU job on `pi_satra`, one real T1w.** Full pipeline end to
-end; outputs land in the `sub-XX/anat`, `sub-XX/stats` layout with `nidm.ttl`
-and `ants_cde.ttl` present.
+end for **both** `--method fusion` and `--method quick`, since the template
+registration `quick` depends on is also being replaced. Outputs land in the
+`sub-XX/anat`, `sub-XX/stats` layout with `nidm.ttl` and `ants_cde.ttl`
+present.
 
 **Tier 3 — agreement, 3 Caltech subjects.** Reference:
 `/orcd/data/satra/002/datasets/simple2_datalad/study-ABIDE/site-Caltech/derivatives/babs-ants-nidm`
@@ -259,6 +318,12 @@ distribution exists for them yet — but they catch boundary degradation that
 volumetric Dice hides on large structures, and establish the baseline for
 future runs.
 
+The delivered derivative was produced with `--method fusion`, so no reference
+exists for `--method quick`. It is covered by tier 2 (runs, produces a
+plausible segmentation, BVOL within envelope) and by the tier-1 direction
+test, but it has no Dice gate. This is a real coverage gap and is recorded as
+such rather than papered over.
+
 Failing the gate blocks the merge. With no ANTs registration path left in the
 app, there is no half-landed state to fall back on: either the FireANTs output
 meets the bar against the delivered derivative, or the branch does not merge.
@@ -271,17 +336,19 @@ before declaring failure.
 |---|---|
 | Silent orientation flip in the ANTsImage ↔ FireANTs conversion | Tier-1 round-trip test with non-identity direction and anisotropic spacing |
 | Registration converges to a plausible-but-wrong warp; app exits 0 with a well-formed TTL | Jacobian gate, BVOL envelope, per-label Dice against a known-good reference — all three, not one |
+| Template↔subject warp direction inverted, reproducing the 11.5 L brain-volume bug | Behavioural tier-1 direction test; `TemplateWarp` exposes a single direction rather than a list whose orientation depends on caller choice |
 | GPU OOM at full 20-atlas batch on smaller cards | `--fireants-batch-size`; default full batch only because `pi_satra` has 80 GB cards |
 | `Dockerfile` / `Singularity` drift | Version-parity test across both files |
 | `fused_ops` build fails or is skipped, silently disabling the generic-label sampler | Container build asserts `import fireants_fused_ops` succeeds |
 | Label-warping method differs (one-hot argmax vs nearestNeighbor), confounding tier-3 attribution | `--label-interpolation nearest` reproduces the reference's method, isolating the registration change from the interpolation change without needing an ANTs engine |
 | No in-app fallback if FireANTs regresses on some subject | The delivered 38-subject derivative and its container remain on disk; rollback is redeploying that image, and the tier-3 gate blocks merge rather than discovering this in production |
 
-## 10. Phase 1 deliverables
+## 10. Deliverables
 
-1. `src/registration/` module implementing `warp_atlases` on FireANTs
-2. `wrapper.py` fusion loop reduced to one `warp_atlases` call, with the
-   `ants.registration` / `ants.apply_transforms` calls deleted
+1. `src/registration/` implementing `warp_atlases`, `register_to_template`,
+   `apply_warp`, and the ANTsImage ↔ FireANTs conversion
+2. `wrapper.py` with all five `ants.registration` / `ants.apply_transforms`
+   sites deleted and `TemplateToSubjectTransforms` replaced by `TemplateWarp`
 3. `--device`, `--fireants-batch-size`, `--label-interpolation` in `run.py`
 4. Updated `Dockerfile`, `Singularity`, `requirements.txt`, `run_container.sh`
 5. Tier-1 tests in `tests/test_registration.py`
