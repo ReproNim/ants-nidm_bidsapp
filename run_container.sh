@@ -74,7 +74,9 @@ else
         echo "ERROR: '$IMAGE' is not a file and docker is not installed." >&2
         exit 1
     fi
+    # FireANTs registration needs the GPU visible inside the container.
     exec docker run --rm \
+        --gpus all \
         -u "$(id -u):$(id -g)" \
         -v "$BIDS_DIR":"$BIDS_DIR":ro \
         -v "$OUTPUT_DIR":"$OUTPUT_DIR" \

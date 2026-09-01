@@ -25,6 +25,10 @@ mkdir -p "$OUT"
 for METHOD in fusion quick; do
     echo "=== method=${METHOD} ==="
     WORK="$(mktemp -d "${TMPDIR:-/tmp}/tier2-${METHOD}-XXXXXX")"
+    # Apptainer does not reliably auto-create a missing host-side bind source;
+    # create it before the bind, not after -- otherwise this can fail at the
+    # bind step, before the app even starts, on a GPU allocation.
+    mkdir -p "${OUT}/${METHOD}"
     apptainer run --nv \
         --bind "${BIDS}:/bids:ro" \
         --bind "${OUT}/${METHOD}:/out" \
