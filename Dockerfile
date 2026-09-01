@@ -32,6 +32,25 @@ RUN pip3 install --no-cache-dir \
     nipype \
     antspyx
 
+# CUDA torch + FireANTs. Registration is GPU-only; see
+# docs/superpowers/specs/2026-09-01-fireants-engine-design.md.
+RUN pip3 install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cu121 \
+        "torch>=2.3.0" && \
+    pip3 install --no-cache-dir fireants==1.5.0 SimpleITK>=2.2.1
+
+# The fused CUDA ops are NOT included by `pip install fireants` and must be
+# built from source. Without them FireANTs does not fail -- it forces
+# is_onehot=True (fireants/io/image.py:145-147) and silently returns a one-hot
+# volume costing 97x the memory. Assert the extension imports so a broken build
+# is caught here rather than in a BABS array.
+RUN git clone --depth 1 --branch v1.5.0 https://github.com/rohitrango/FireANTs.git /tmp/fireants-src && \
+    cd /tmp/fireants-src/fused_ops && \
+    python3 setup.py build_ext && \
+    python3 setup.py install && \
+    cd / && rm -rf /tmp/fireants-src && \
+    python3 -c "import fireants_fused_ops; print('fused ops OK')"
+
 # Canonical ANTs binaries, pinned release. The wrapper shells out to
 # antsBrainExtraction.sh (the published extraction method the OASIS-30
 # template kit was built for); ANTsPy does not ship the CLI tools or the

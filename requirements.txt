@@ -18,3 +18,8 @@ oxrdflib~=0.5.0
 # Without it `import ants_seg_to_nidm` dies with ModuleNotFoundError and every
 # NIDM conversion fails.
 prov[graph]
+# Registration runs on FireANTs (GPU). torch is installed separately in the
+# container with a CUDA index URL; the CPU wheel used by CI lives in
+# requirements-test.txt.
+fireants==1.5.0
+SimpleITK>=2.2.1

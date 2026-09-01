@@ -7,6 +7,8 @@
 #     inside a SIF unless something writable is mounted over it)
 #   - read-only input / writable output binds with absolute paths
 #   - a sensible thread count passed through to the app
+#   - --nv so the GPU is visible inside the container (registration is
+#     GPU-only; without it the app exits early with a device error)
 #
 # Usage:
 #   ./run_container.sh <image> <bids_dir> <output_dir> <participant-label> [extra app args...]
@@ -56,8 +58,9 @@ if [ -f "$IMAGE" ]; then
         echo "ERROR: '$IMAGE' is a file but neither apptainer nor singularity is installed." >&2
         exit 1
     fi
-    exec "$RUNNER" run \
-        --userns --no-home \
+    # FireANTs registration needs the GPU visible inside the container.
+    APPTAINER_ARGS=(run --userns --no-home --nv)
+    exec "$RUNNER" "${APPTAINER_ARGS[@]}" \
         -B "$BIDS_DIR":"$BIDS_DIR":ro \
         -B "$OUTPUT_DIR":"$OUTPUT_DIR" \
         -B "$WORK_DIR":/work \
