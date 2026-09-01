@@ -169,10 +169,14 @@ closer analogue to the `SyNRA` it replaces. Learning rate, `cc_kernel_size`,
 oasis.py values as defaults, so tier-3 disagreement can be tuned without code
 changes.
 
-`target_mask` is passed to the masked loss path. The ANTs call being replaced
-passed no mask; restricting the metric to the brain is expected to help rather
-than hurt, and is recorded here as an intentional difference from the
-reference derivative.
+`target_mask` is carried in the signature because `ants.joint_label_fusion`
+needs it downstream, but it is **not** wired into the similarity loss. An
+earlier draft of this spec proposed doing so as an improvement over the ANTs
+call, which passes no mask. That was redundant: `masked_brain` is already
+`BrainSegmentationN4 * BrainExtractionMask` (`wrapper.py:352`) and the
+OASIS-TRT-20 atlases are brain-only volumes, so both sides of the metric are
+already skull-stripped. Adding a mask would change nothing and would be one
+more difference from the reference derivative for no gain.
 
 **Batching.** All twenty atlases register against one fixed target in a single
 `BatchedImages`. `batch_size` allows chunking on smaller cards. On `pi_satra`
