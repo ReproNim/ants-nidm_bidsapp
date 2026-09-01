@@ -45,7 +45,7 @@ From: ubuntu:22.04
     python3 -m pip install --no-cache-dir \
         --extra-index-url https://download.pytorch.org/whl/cu121 \
         "torch>=2.3.0"
-    python3 -m pip install --no-cache-dir fireants==1.5.0 SimpleITK>=2.2.1
+    python3 -m pip install --no-cache-dir fireants==1.5.0 "SimpleITK>=2.2.1"
 
     # The fused CUDA ops are NOT included by `pip install fireants` and must be
     # built from source. Without them FireANTs does not fail -- it forces
