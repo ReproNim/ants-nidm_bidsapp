@@ -1,7 +1,27 @@
-FROM ubuntu:22.04
+# CUDA *devel* base, not plain ubuntu:22.04. FireANTs' fused_ops extension is
+# built from source below, and fused_ops/setup.py uses
+# torch.utils.cpp_extension.CUDAExtension over nine .cu sources. CUDAExtension()
+# calls library_paths(cuda=True) -> _join_cuda_home(...), which raises
+# `EnvironmentError: CUDA_HOME environment variable is not set` the moment nvcc
+# is absent -- so on ubuntu:22.04 the build died at `setup.py build_ext`, before
+# the `import fireants_fused_ops` assertion could ever run. The tag matches the
+# cu121 torch wheel installed below; torch only hard-fails on a CUDA *major*
+# mismatch (torch/utils/cpp_extension.py:_check_cuda_version), so 12.1 toolchain
+# + any cu12x wheel is fine.
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
 # Set non-interactive frontend for apt-get
 ENV DEBIAN_FRONTEND=noninteractive
+
+# The CUDA base image ships nvcc but no Python, so python3/python3-pip are
+# installed by the apt step below and every later `python3`/`pip3` invocation
+# depends on that. Do not drop them.
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=/usr/local/cuda/bin:$PATH
+# The build host has no GPU, so nvcc cannot autodetect an architecture and
+# torch falls back to compiling for whatever it guesses. Name the deployment
+# targets explicitly: A100 (sm_80) and H100 (sm_90) on pi_satra.
+ENV TORCH_CUDA_ARCH_LIST="8.0;9.0"
 
 # Install system dependencies
 RUN apt-get update && \

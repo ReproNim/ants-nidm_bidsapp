@@ -1,5 +1,13 @@
 Bootstrap: docker
-From: ubuntu:22.04
+# CUDA *devel* base, not plain ubuntu:22.04. FireANTs' fused_ops extension is
+# built from source in %post, and fused_ops/setup.py uses
+# torch.utils.cpp_extension.CUDAExtension over nine .cu sources. CUDAExtension()
+# calls library_paths(cuda=True) -> _join_cuda_home(...), which raises
+# `EnvironmentError: CUDA_HOME environment variable is not set` the moment nvcc
+# is absent -- so on ubuntu:22.04 the build died at `setup.py build_ext`, before
+# the `import fireants_fused_ops` assertion could ever run. The tag matches the
+# cu121 torch wheel installed below and must stay in sync with the Dockerfile.
+From: nvidia/cuda:12.1.1-devel-ubuntu22.04
 
 %files
     ./src /opt/src
@@ -7,6 +15,24 @@ From: ubuntu:22.04
     ./requirements.txt /opt/requirements.txt
 
 %post
+    # Fail the build on the first failing command. Without this, %post's exit
+    # status is that of its *last* command -- and the
+    # `import fireants_fused_ops` assertion below is followed by ~40 more
+    # commands, so a failed fused_ops build produced a container that built
+    # successfully and then silently degraded to the one-hot label path at
+    # runtime (fireants/io/image.py:145-147). `set -e` is what makes that
+    # assertion, and every other check in here, actually gate the build.
+    set -e
+
+    export DEBIAN_FRONTEND=noninteractive
+    # The CUDA base image ships nvcc but no Python; python3.10/python3-pip are
+    # installed below and everything after depends on them.
+    export CUDA_HOME=/usr/local/cuda
+    export PATH=/usr/local/cuda/bin:$PATH
+    # The build host has no GPU, so nvcc cannot autodetect an architecture.
+    # Name the deployment targets explicitly: A100 (sm_80) and H100 (sm_90).
+    export TORCH_CUDA_ARCH_LIST="8.0;9.0"
+
     # Update and install basic system dependencies
     apt update && \
     apt install -y \
@@ -25,12 +51,14 @@ From: ubuntu:22.04
         rm -rf /var/lib/apt/lists/*
 
     # Create symbolic links for python3.10 if they don't exist
+    # -f as well as the guard: under `set -e` a plain `ln -s` onto an
+    # existing non-symlink path would abort the whole build.
     if [ ! -L /usr/bin/python3 ]; then
-        ln -s /usr/bin/python3.10 /usr/bin/python3
+        ln -sf /usr/bin/python3.10 /usr/bin/python3
     fi
 
     if [ ! -L /usr/bin/python ]; then
-        ln -s /usr/bin/python3.10 /usr/bin/python
+        ln -sf /usr/bin/python3.10 /usr/bin/python
     fi
 
     # Upgrade pip and install basic Python tools
@@ -148,8 +176,10 @@ From: ubuntu:22.04
 %environment
     # Add opt to Python path
     export PYTHONPATH=/opt:$PYTHONPATH
+    # CUDA toolchain from the nvidia/cuda base image
+    export CUDA_HOME=/usr/local/cuda
     # Add Python packages to path
-    export PATH=/opt/ants-bin:/usr/local/bin:$PATH
+    export PATH=/opt/ants-bin:/usr/local/bin:/usr/local/cuda/bin:$PATH
     # Trailing slash: older ANTs scripts concatenate ${ANTSPATH}tool directly
     export ANTSPATH=/opt/ants-bin/
     export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=1
@@ -169,7 +199,11 @@ From: ubuntu:22.04
     Version Information:
     - ANTs BIDS App: 0.1.0
     - Python: 3.10
-    - Base: Ubuntu 22.04
+    - Base: nvidia/cuda:12.1.1-devel-ubuntu22.04
+
+    Registration runs on FireANTs and requires a GPU. Run with `--nv` and
+    submit to a GPU partition (--gres=gpu:1); without a visible device the app
+    exits immediately with a device error rather than falling back to CPU.
 
     Usage:
       singularity run [container] [input_dir] [output_dir] participant [options]
