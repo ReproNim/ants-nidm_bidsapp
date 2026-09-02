@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import logging
 import importlib
+from contextlib import contextmanager
 import ants
 import nibabel as nib
 import numpy as np
@@ -62,7 +63,23 @@ class ANTsSegmentation:
         # Convert all path inputs to Path objects
         self.bids_dir = Path(bids_dir) if bids_dir else None
         self.output_dir = Path(output_dir) if output_dir else None
-        self.temp_dir = Path(temp_dir) if temp_dir else (Path(output_dir) / 'tmp' if output_dir else None)
+        # Scratch root. Order matters:
+        #   1. an explicit temp_dir the caller passed -- never touched beyond
+        #      creating per-run subdirectories inside it;
+        #   2. $TMPDIR, which the container sets to the writable /work bind
+        #      that run_container.sh and both sbatch scripts already mount.
+        #      Nothing read it before, so ~1-2 GB of warped-atlas scratch per
+        #      subject went to the output tree instead (spec section 4 says
+        #      every crossing goes through a file on TMPDIR);
+        #   3. output_dir/tmp, the previous behaviour, as a last resort.
+        if temp_dir:
+            self.temp_dir = Path(temp_dir)
+        elif os.environ.get('TMPDIR'):
+            self.temp_dir = Path(os.environ['TMPDIR']) / 'ants-nidm'
+        elif output_dir:
+            self.temp_dir = Path(output_dir) / 'tmp'
+        else:
+            self.temp_dir = None
         
         # Set data paths - check both container and local paths
         # First check for container path, then local development path
@@ -167,6 +184,30 @@ class ANTsSegmentation:
         if not self.template_labels_path.exists():
             self.logger.warning(f"Template labels file not found: {self.template_labels_path}")
             
+    @contextmanager
+    def _scratch(self, prefix):
+        """A private scratch directory under temp_dir, removed on exit.
+
+        Deliberately never yields temp_dir itself. temp_dir may be a path the
+        caller handed us, or the container's /work bind shared with other
+        jobs; deleting it is not ours to do. `mkdtemp` gives a directory we
+        created and therefore may remove, so cleanup cannot reach anything
+        passed in on purpose.
+
+        This exists because nothing used to delete the per-subject
+        registration scratch at all: warp_atlases writes target.nii.gz plus 40
+        warped volumes (~1-2 GB) per subject and they accumulated for the life
+        of the output tree.
+        """
+        base = str(self.temp_dir) if self.temp_dir else None
+        if base:
+            Path(base).mkdir(parents=True, exist_ok=True)
+        path = Path(tempfile.mkdtemp(prefix=prefix, dir=base))
+        try:
+            yield path
+        finally:
+            shutil.rmtree(path, ignore_errors=True)
+
     def _load_templates(self):
         """Load OASIS-30 Atropos templates.
         
@@ -380,15 +421,18 @@ class ANTsSegmentation:
                 raise ValueError("No TemplateWarp available for template-to-subject mapping")
 
             label_map = build_label_map([self.template_labels_path])
-            warped_labels = apply_warp(
-                template_warp,
-                ants.image_read(str(self.template_labels_path)),
-                thickness_results['BrainSegmentationN4'],
-                temp_dir=self.temp_dir,
-                interpolation=self.label_interpolation,
-                label_map=label_map,
-                logger=self.logger,
-            )
+            # The returned image is fully in memory, so the scratch NIfTIs the
+            # warp round-trips through can go as soon as the call returns.
+            with self._scratch('warp_') as scratch:
+                warped_labels = apply_warp(
+                    template_warp,
+                    ants.image_read(str(self.template_labels_path)),
+                    thickness_results['BrainSegmentationN4'],
+                    temp_dir=scratch,
+                    interpolation=self.label_interpolation,
+                    label_map=label_map,
+                    logger=self.logger,
+                )
 
             return {
                 'segmentation': warped_labels,
@@ -424,17 +468,23 @@ class ANTsSegmentation:
             # Registration is FireANTs; the fusion voting below stays on ANTs.
             # Images cross the boundary as NIfTI files under temp_dir and are
             # geometry-checked on the way back -- see src/registration/handoff.py.
-            warped_images, warped_labels = warp_atlases(
-                masked_brain,
-                thickness_results['BrainExtractionMask'],
-                T1s,
-                labels,
-                temp_dir=self.temp_dir,
-                device=self.device,
-                batch_size=self.fireants_batch_size,
-                label_interpolation=self.label_interpolation,
-                logger=self.logger,
-            )
+            # ~1-2 GB of target + 40 warped volumes, in a directory of our own
+            # under TMPDIR. warp_atlases reads every one of them back into
+            # memory as an ANTsImage before returning (and joint_label_fusion
+            # below passes in-memory pointers), so the files are dead the
+            # moment the call returns.
+            with self._scratch('fireants_') as scratch:
+                warped_images, warped_labels = warp_atlases(
+                    masked_brain,
+                    thickness_results['BrainExtractionMask'],
+                    T1s,
+                    labels,
+                    temp_dir=scratch,
+                    device=self.device,
+                    batch_size=self.fireants_batch_size,
+                    label_interpolation=self.label_interpolation,
+                    logger=self.logger,
+                )
 
             # Perform joint label fusion
             self.logger.info(f"Running joint label fusion with {len(warped_images)} atlases")
@@ -810,13 +860,16 @@ class ANTsSegmentation:
         # returned warp already points template -> subject: the direction every
         # consumer needs. There is no fwd/inv pair to choose between, which is
         # what previously produced an 11.5 L brain volume on ABIDE sub-0051456.
-        template_warp = register_to_template(
-            brain_image,
-            brain_template,
-            temp_dir=self.temp_dir,
-            device=self.device,
-            logger=self.logger,
-        )
+        # TemplateWarp holds torch tensors, not files: the two NIfTIs written
+        # here are only needed while FireANTs loads them.
+        with self._scratch('tplreg_') as scratch:
+            template_warp = register_to_template(
+                brain_image,
+                brain_template,
+                temp_dir=scratch,
+                device=self.device,
+                logger=self.logger,
+            )
 
         # BrainExtractionMask is the canonical script's product, untouched: its
         # Atropos refinement and morphology already finalized it.

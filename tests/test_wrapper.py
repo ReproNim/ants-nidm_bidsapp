@@ -647,6 +647,111 @@ class TestANTsSegmentation(unittest.TestCase):
         self.assertIn("TemplateWarp", str(ctx.exception))
         mock_apply_warp.assert_not_called()
 
+    def test_temp_dir_defaults_to_tmpdir_when_no_explicit_path_is_given(self):
+        """The container sets TMPDIR=/work and run_container.sh plus both
+        sbatch scripts bind a writable directory there. Nothing read it, so
+        ~1-2 GB of per-subject registration scratch went to the output tree
+        instead (spec section 4: every crossing goes through a file on
+        TMPDIR)."""
+        with patch('src.antspy.wrapper.ANTsSegmentation._load_templates'), \
+             patch.dict(os.environ, {'TMPDIR': str(self.temp_dir / 'work')}):
+            seg = ANTsSegmentation(
+                bids_dir=str(self.bids_dir),
+                output_dir=str(self.output_dir),
+                modality='T1w',
+                device='cpu',
+            )
+        assert str(seg.temp_dir).startswith(str(self.temp_dir / 'work')), (
+            f"temp_dir {seg.temp_dir} is not under TMPDIR"
+        )
+        self.assertFalse(
+            str(seg.temp_dir).startswith(str(self.output_dir)),
+            "scratch must not land in the output tree, which BABS zips",
+        )
+
+    def test_explicit_temp_dir_beats_tmpdir(self):
+        """A caller who passes temp_dir means it."""
+        with patch('src.antspy.wrapper.ANTsSegmentation._load_templates'), \
+             patch.dict(os.environ, {'TMPDIR': str(self.temp_dir / 'work')}):
+            seg = ANTsSegmentation(
+                bids_dir=str(self.bids_dir),
+                output_dir=str(self.output_dir),
+                temp_dir=str(self.temp_path),
+                modality='T1w',
+                device='cpu',
+            )
+        self.assertEqual(str(seg.temp_dir), str(self.temp_path))
+
+    def test_temp_dir_falls_back_to_the_output_tree_without_tmpdir(self):
+        env = {k: v for k, v in os.environ.items() if k != 'TMPDIR'}
+        with patch('src.antspy.wrapper.ANTsSegmentation._load_templates'), \
+             patch.dict(os.environ, env, clear=True):
+            seg = ANTsSegmentation(
+                bids_dir=str(self.bids_dir),
+                output_dir=str(self.output_dir),
+                modality='T1w',
+                device='cpu',
+            )
+        self.assertEqual(str(seg.temp_dir), str(self.output_dir / 'tmp'))
+
+    def test_scratch_directory_is_removed_and_temp_dir_survives(self):
+        """Cleanup must never reach a directory the caller supplied -- only the
+        mkdtemp child this class created."""
+        marker = self.temp_path / 'caller_owned.txt'
+        marker.write_text('do not delete me')
+
+        with self.segmenter._scratch('fireants_') as scratch:
+            self.assertTrue(scratch.is_dir())
+            self.assertEqual(scratch.parent, self.temp_path)
+            (scratch / 'warped_atlas_00.nii.gz').write_text('x')
+            captured = scratch
+
+        self.assertFalse(captured.exists(), "per-run scratch was not removed")
+        self.assertTrue(self.temp_path.is_dir(), "temp_dir itself must survive")
+        self.assertTrue(marker.exists(), "caller-owned contents must survive")
+
+    def test_scratch_is_removed_even_when_the_body_raises(self):
+        with self.assertRaises(RuntimeError):
+            with self.segmenter._scratch('fireants_') as scratch:
+                captured = scratch
+                raise RuntimeError("registration folded")
+        self.assertFalse(captured.exists())
+
+    def test_fusion_scratch_is_a_private_subdirectory_that_is_cleaned_up(self):
+        """warp_atlases must be handed a directory of our own under temp_dir,
+        and that directory must be gone once segment_image returns."""
+        from unittest.mock import patch
+
+        seen = {}
+
+        def record(*args, **kwargs):
+            seen['temp_dir'] = Path(kwargs['temp_dir'])
+            seen['existed'] = seen['temp_dir'].is_dir()
+            return ([], [])
+
+        with patch("src.antspy.wrapper.warp_atlases", side_effect=record), \
+             patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct, \
+             patch("src.antspy.wrapper.ants.joint_label_fusion") as mock_jlf:
+            mock_ct.return_value = {
+                "BrainSegmentationN4": mock_image_read(),
+                "BrainExtractionMask": mock_image_read(),
+                "TemplateWarp": object(),
+            }
+            mock_jlf.return_value = {
+                "segmentation": mock_image_read(),
+                "intensity": mock_image_read(),
+                "probabilityimages": [],
+                "segmentation_numbers": [1],
+            }
+            self.segmenter.segment_image(mock_image_read(), method="fusion")
+
+        self.assertTrue(seen['existed'], "scratch must exist during the call")
+        self.assertEqual(seen['temp_dir'].parent, self.temp_path)
+        self.assertNotEqual(seen['temp_dir'], self.temp_path,
+                            "must not hand out temp_dir itself")
+        self.assertFalse(seen['temp_dir'].exists(),
+                         "per-subject warped volumes (~1-2 GB) were not cleaned up")
+
     def test_device_cuda_without_gpu_raises_before_any_processing(self):
         """Constructing with device='cuda' on a GPU-less host must fail at
         construction time, before templates or images are touched.
