@@ -9,12 +9,48 @@ This BIDS App provides a standardized way to run ANTs-based brain segmentation o
 ## Features
 
 - BIDS-compliant input/output
-- ANTs-based brain segmentation
-- N4 bias field correction
-- Brain extraction
-- Tissue segmentation
+- N4 bias field correction (ANTs)
+- Brain extraction via `antsBrainExtraction.sh` (ANTs)
+- GPU-accelerated registration via [FireANTs](https://github.com/rohitrango/FireANTs)
+- Joint label fusion voting (ANTsPy `joint_label_fusion`)
 - NIDM-compatible outputs
 - Docker and Singularity support
+
+## Requirements: a GPU is mandatory
+
+**Breaking change.** Every registration in this app now runs on FireANTs, on
+the GPU. Both `--method fusion` and `--method quick` need a visible CUDA
+device -- `quick` too, because the subject-to-template registration it depends
+on moved along with the fusion loop.
+
+With no visible GPU the app **exits immediately** with `DeviceUnavailable`,
+before reading any image. It does not fall back to CPU: FireANTs on CPU is
+slower than the ANTs code it replaced, so a silent fallback inside a BABS
+array would turn a fast job into a many-hour one while still exiting 0.
+`--device cpu` remains available as an explicit opt-in for tests and small
+debugging runs.
+
+In practice this means:
+
+- **Apptainer/Singularity:** pass `--nv`. `run_container.sh` already does.
+- **Docker:** pass `--gpus all`. `run_container.sh` already does.
+- **Slurm:** request a GPU, e.g. `--partition pi_satra --gres=gpu:1`.
+- **A writable `/work` bind.** The image sets `TMPDIR=/work` and the app puts
+  its registration scratch (~1-2 GB per subject, deleted after use) there.
+  `run_container.sh` mounts it.
+
+```bash
+# Slurm + Apptainer
+sbatch --partition pi_satra --gres=gpu:1 --cpus-per-task 8 --mem 48G \
+  --wrap "apptainer run --nv \
+    -B /path/to/bids:/bids:ro -B /path/to/out:/out -B \$TMPDIR:/work \
+    ants-nidm_bidsapp.sif /bids /out participant \
+      --participant-label 01 --method fusion --device cuda --num-threads 8"
+```
+
+**What did not change.** FireANTs does registration and nothing else. N4 bias
+correction, `antsBrainExtraction.sh`, Atropos and the `joint_label_fusion`
+voting still run on ANTs 2.5.4 / ANTsPy, which the container still ships.
 
 ## Installation
 
@@ -89,8 +125,12 @@ name, and passes any extra arguments straight to the app:
   --num-threads 8 --nidm-input-dir /path/to/nidm --verbose
 ```
 
-Expect roughly 1–2 hours per subject at 8–16 threads and up to ~18 GB of RAM
-for the default joint-label-fusion method.
+The wrapper passes `--nv` (Apptainer) or `--gpus all` (Docker) for you and
+mounts a writable scratch directory at `/work`.
+
+RAM for joint label fusion is still up to ~18 GB -- the voting stage is
+unchanged ANTsPy. Wall-clock is dominated by the twenty atlas registrations,
+which now run on the GPU instead of on 8-16 CPU threads.
 
 ### Basic Usage
 
@@ -140,7 +180,25 @@ ants-nidm bids_dir output_dir participant \
 - `--modality`: Imaging modality to process (default: T1w)
 - `--method`: Segmentation method - `quick` or `fusion` (default: fusion)
 - `--prob-threshold`: Probability threshold for binary mask creation (default: 0.5)
-- `--num-threads`: Number of threads to use for processing (default: 1)
+- `--num-threads`: Number of threads to use for processing (default: 1). Applies
+  to the ANTs stages (N4, brain extraction, fusion voting) via
+  `ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS`; registration runs on the GPU.
+
+**Registration Options (FireANTs):**
+- `--device`: `cuda` or `cpu` (default: `cuda`). `cuda` with no visible GPU
+  raises `DeviceUnavailable` before any processing; there is no automatic
+  fallback. `cpu` is an explicit opt-in for debugging and is much slower than
+  the ANTs path it replaced.
+- `--fireants-batch-size`: how many atlases to register per batch, for
+  `--method fusion` (default: `0`, meaning all twenty at once). Lower it if
+  GPU memory is tight; results are identical, only peak VRAM changes.
+- `--label-interpolation`: `genericlabel` or `nearest` (default:
+  `genericlabel`). `genericlabel` uses FireANTs' fused CUDA generic-label
+  sampler, which returns argmax labels directly. That kernel exists only on
+  CUDA, so with `--device cpu` (or an image built without the fused ops) the
+  app requests a one-hot warp instead and argmaxes it itself -- same result,
+  ~100x the channels, and a warning in the log. `nearest` warps the raw label
+  intensities with nearest-neighbour sampling.
 
 **Skip Options:**
 - `--skip-nidm`: Skip NIDM conversion step (run ANTs only)
@@ -195,6 +253,19 @@ Output files include:
 - **Probability maps** for each tissue class
 - **Statistics files** (CSV) for downstream analysis
 - **NIDM-compatible outputs** (Turtle RDF format) for reproducibility and data sharing
+
+## Validation harnesses
+
+`scripts/` carries the GPU test tiers from the FireANTs design
+(`docs/superpowers/specs/2026-09-01-fireants-engine-design.md` section 7):
+
+- `scripts/tier2_smoke.sbatch <sif> <bids> <out> <participant>` -- one subject
+  through both methods on a GPU node, asserting the per-subject layout plus
+  `nidm.ttl` and `ants_cde.ttl`.
+- `scripts/tier3_agreement.sbatch <sif> <out>` -- three ABIDE Caltech subjects
+  compared against the delivered ANTs derivative, with volume-stratified Dice
+  and volume thresholds. The comparison runs inside the container, because it
+  needs FireANTs' own `scripts/evalutils.py`.
 
 ## NIDM Outputs
 
