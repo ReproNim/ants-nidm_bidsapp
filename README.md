@@ -125,6 +125,20 @@ ants-nidm bids_dir output_dir participant \
   --nidm-input-dir /path/to/nidm/inputs
 ```
 
+### BABS compatibility
+
+The app supports both the original BABS project layout and the configurable
+BIDS-study layout introduced by
+[PennLINC/babs PR #369](https://github.com/PennLINC/babs/pull/369). See
+[`examples/babs-ants-nidm-bids-study.yaml`](examples/babs-ants-nidm-bids-study.yaml)
+for a complete new-layout template; remove its three path settings to retain
+BABS's legacy defaults.
+
+BABS uses the positional analysis level `participant` even for session-wise
+jobs and supplies the session through `$SESSION_SELECTION_FLAG`. When
+`--session-label` accompanies participant mode, this app runs its existing
+session pipeline so only the requested session is segmented and converted.
+
 ### Command-line Arguments
 
 **Required:**

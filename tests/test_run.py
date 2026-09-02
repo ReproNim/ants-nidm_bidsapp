@@ -337,6 +337,16 @@ class TestRun(unittest.TestCase):
             mock_instance.run_subject.assert_called_once()
             mock_nidm.assert_called_once()
 
+    def test_participant_level_with_session_uses_session_pipeline(self):
+        """BABS supplies sessions while retaining positional participant mode."""
+        args = MagicMock(session_label="ses-01")
+
+        with patch("src.run.process_session", return_value=0) as mock_session:
+            result = process_participant(args, self.logger)
+
+        self.assertEqual(result, 0)
+        mock_session.assert_called_once_with(args, self.logger)
+
     @unittest.skipIf(IN_CI, "Skip in CI environment as it requires modifying template directory")
     def test_process_session(self):
         """Test session level processing with NIDM conversion"""

@@ -412,7 +412,14 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
         return False
 
 def process_participant(args, logger):
-    """Run the participant level analysis for single-session datasets."""
+    """Run participant analysis, including BABS session-wise invocations."""
+    if args.session_label:
+        logger.info(
+            "Session label supplied with participant analysis level; "
+            "processing the requested session"
+        )
+        return process_session(args, logger)
+
     logger.info("Starting participant level analysis (single-session dataset)")
 
     # Initialize app

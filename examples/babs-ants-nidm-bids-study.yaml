@@ -1,0 +1,51 @@
+# Example BABS configuration for ants-nidm 0.1.0 using the BIDS-study layout
+# added by PennLINC/babs PR #369.
+
+analysis_path: "."
+input_ria_path: ".babs/input_ria"
+output_ria_path: ".babs/output_ria"
+
+input_datasets:
+    BIDS:
+        required_files:
+            - "anat/*_T1w.nii*"
+        is_zipped: false
+        origin_url: "/path/to/BIDS"
+        path_in_babs: sourcedata/BIDS
+    NIDM:
+        required_files:
+            - "nidm.ttl"
+        is_zipped: false
+        origin_url: "/path/to/NIDM"
+        path_in_babs: sourcedata/NIDM
+
+bids_app_args:
+    $SUBJECT_SELECTION_FLAG: "--participant-label"
+    # For a BABS project initialized with processing level "session", uncomment:
+    # $SESSION_SELECTION_FLAG: "--session-label"
+    --num-threads: "8"
+
+singularity_args:
+    - --cleanenv
+    - --containall
+    - --writable-tmpfs
+
+zip_foldernames:
+    ants-nidm_bidsapp: "0-1-0"
+
+cluster_resources:
+    interpreting_shell: "/bin/bash"
+    hard_runtime_limit: "18:00:00"
+    temporary_disk_space: 50G
+    customized_text: |
+        #SBATCH --nodes=1
+        #SBATCH --ntasks=1
+        #SBATCH --cpus-per-task=8
+        #SBATCH --mem=32G
+        #SBATCH --propagate=NONE
+
+script_preamble: |
+    # Load site-specific Apptainer/DataLad modules or activate BABS here.
+    module load apptainer
+
+job_compute_space: "/path/to/temporary_compute_space"
