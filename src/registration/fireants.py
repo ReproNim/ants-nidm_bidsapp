@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from src.registration.handoff import (
+    assert_geometry_match,
     geometry_of,
     read_nifti,
     write_nifti,
@@ -80,6 +81,26 @@ def labels_from_warp_result(tensor, label_map):
     return label_map.restore_array(indices)
 
 
+def _force_onehot(device, ffo_available):
+    """Whether to ask FireANTs for a one-hot label volume *explicitly*.
+
+    `fireants.io.Image.__init__` forces `is_onehot=True` only when
+    `fi.use_ffo` is false, and `use_ffo = USE_FFO and FFO_AVAILABLE` is a
+    module-level global decided at import -- it is not per-tensor. So in the
+    production container, where fused ops *are* built, `--device cpu` leaves
+    `is_onehot=False` and `interpolation_mode='genericlabel'`; then at call
+    time `GridSampleDispatcher.augment_registry_backend` flips `_use_ffo` off
+    because the tensors are not on cuda, and `__call__` raises
+    `RuntimeError("genericlabel interpolation requires fused ops")`. The
+    combination the spec promises works would crash in the shipped image.
+
+    Asking for one-hot whenever the fused generic-label sampler cannot be used
+    -- no fused ops at all, or fused ops but not on cuda -- takes the degraded
+    path deliberately instead.
+    """
+    return not ffo_available or device != "cuda"
+
+
 def _seg_preprocessor(label_map):
     """Remap sparse ids to contiguous indices, on the torch tensor FireANTs
     hands us (fireants/io/image.py:151, applied before max_seg_label clamping).
@@ -119,6 +140,20 @@ def _tensor_to_nifti(tensor, reference_itk, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(out, str(path))
     return path
+
+
+def _assert_inbound(expected, image, context):
+    """Verify a `fireants.io.Image` loaded from an ANTsPy-written file kept its
+    header.
+
+    This is the geometry check that can actually fail. The *outbound* check --
+    `read_nifti(..., expect=target_geom)` on a volume `_tensor_to_nifti` just
+    stamped with `CopyInformation(reference_itk)` from that very same fixed
+    image -- compares a header with itself; only shape can differ there, and
+    only for non-cubic volumes. What is genuinely unverified is whether
+    SimpleITK reproduced what ANTsPy wrote.
+    """
+    assert_geometry_match(expected, geometry_of(image.itk_image), context=context)
 
 
 def _chunks(items, size):
@@ -184,12 +219,16 @@ def warp_atlases(
         FFO_AVAILABLE,
         label_interpolation,
     )
-    if label_interpolation == "genericlabel" and (
-        not FFO_AVAILABLE or device != "cuda"
-    ):
+    onehot = _force_onehot(device, FFO_AVAILABLE)
+    if label_interpolation == "genericlabel" and onehot:
         log.warning(
-            "genericlabel requested but fused ops are unavailable (FFO=%s, "
-            "device=%s); FireANTs will fall back to one-hot, costing %d channels",
+            "genericlabel requested but the fused generic-label sampler is "
+            "unusable here (fused_ops=%s, device=%s): it is a CUDA kernel and "
+            "is skipped for tensors that are not on cuda. Requesting "
+            "is_onehot=True explicitly instead, costing %d channels. FireANTs "
+            "only forces one-hot by itself when fused ops are missing "
+            "entirely -- with fused ops built but device=cpu it would keep "
+            "interpolation_mode='genericlabel' and raise at call time.",
             FFO_AVAILABLE,
             device,
             label_map.max_index + 1,
@@ -197,6 +236,12 @@ def warp_atlases(
 
     target_path = write_nifti(target, temp_dir / "target.nii.gz")
     fixed = Image.load_file(str(target_path), device=device)
+    # Inbound guard -- the direction that can actually differ. Outbound tensors
+    # get the fixed image's header stamped onto them wholesale by
+    # _tensor_to_nifti's CopyInformation, so checking those against the same
+    # fixed image compares a header with itself. What is genuinely unverified
+    # is what SimpleITK made of the file ANTsPy just wrote.
+    _assert_inbound(target_geom, fixed, "target crossing into FireANTs")
     fixed_batch = BatchedImages([fixed])
     reference_itk = fixed.itk_image
 
@@ -236,16 +281,27 @@ def warp_atlases(
 
         moved = syn.evaluate(fixed_batch, moving_batch)
 
-        folding = folding_fraction(syn, fixed_batch, moving_batch)
-        log.info("Non-positive Jacobian determinants: %.4f%%", folding * 100.0)
-        if folding > MAX_FOLDING_FRACTION:
-            raise RuntimeError(
-                f"registration folded: {folding * 100:.3f}% of voxels have a "
-                f"non-positive Jacobian determinant (limit "
-                f"{MAX_FOLDING_FRACTION * 100:.3f}%). The warp is not "
-                f"diffeomorphic; the segmentation would be wrong in a way Dice "
-                f"against a single reference may not reveal."
+        # Checked per atlas, not as a batch mean: one folding atlas among
+        # twenty clean ones is invisible in the average (spec section 8
+        # criterion 7 says "for every atlas registration").
+        foldings = folding_fraction(syn, fixed_batch, moving_batch)
+        for k, folding in enumerate(foldings):
+            atlas = chunk[k][0]
+            log.info(
+                "Non-positive Jacobian determinants, atlas %d (%s): %.4f%%",
+                index + k,
+                atlas.name,
+                folding * 100.0,
             )
+            if folding > MAX_FOLDING_FRACTION:
+                raise RuntimeError(
+                    f"registration folded for atlas {index + k} ({atlas}): "
+                    f"{folding * 100:.3f}% of voxels have a non-positive "
+                    f"Jacobian determinant (limit "
+                    f"{MAX_FOLDING_FRACTION * 100:.3f}%). The warp is not "
+                    f"diffeomorphic; the segmentation would be wrong in a way "
+                    f"Dice against a single reference may not reveal."
+                )
 
         if label_interpolation == "genericlabel":
             label_batch = BatchedImages(
@@ -257,6 +313,7 @@ def warp_atlases(
                         background_seg_label=-1,
                         max_seg_label=label_map.max_index,
                         seg_preprocessor=_seg_preprocessor(label_map),
+                        is_onehot=onehot,
                     )
                     for _, lp in chunk
                 ]
@@ -310,12 +367,27 @@ def warp_atlases(
     return warped_atlases, warped_labels
 
 
+def folding_fractions_from_det(det):
+    """Per-batch-element fraction of non-positive Jacobian determinants.
+
+    Reduces over the spatial axes only. Flattening the whole [N, ...] tensor
+    and taking one mean dilutes a folding atlas by the N-1 clean ones: at the
+    default batch_size=0 (N=20) an atlas folding on 2% of its voxels shows up
+    as a 0.1% batch mean and slips under the gate. Spec section 8 criterion 7
+    is "for every atlas registration", not for their average.
+    """
+    n = det.shape[0]
+    bad = (det <= 0).reshape(n, -1)
+    return [float(v) for v in bad.to(det.dtype).mean(dim=1)]
+
+
 def folding_fraction(registration, fixed_batch, moving_batch):
-    """Fraction of voxels where the warp's Jacobian determinant is <= 0.
+    """Fraction of voxels where the warp's Jacobian determinant is <= 0, as one
+    value per batch element in batch order.
 
     A folding warp is provably bad independently of Dice, and the ANTs path
     being replaced had no such check. Spec section 8 criterion 7 gates this at
-    0.1%. Mirrors the diffeomorphism check in FireANTs' own
+    0.1% per registration. Mirrors the diffeomorphism check in FireANTs' own
     tutorials/tutorial1_basic_usage.py.
     """
     import torch
@@ -323,8 +395,7 @@ def folding_fraction(registration, fixed_batch, moving_batch):
 
     warp = registration.get_warped_coordinates(fixed_batch, moving_batch)
     jac = jacobian(warp).permute(0, 2, 3, 4, 1, 5)[:, 1:-1, 1:-1, 1:-1, :]
-    det = torch.linalg.det(jac).reshape(-1)
-    return float((det <= 0).float().mean().item())
+    return folding_fractions_from_det(torch.linalg.det(jac))
 
 
 class TemplateWarp:
@@ -372,6 +443,8 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     log = logger or logging.getLogger("ants-nidm.registration")
     temp_dir = Path(temp_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
+    subject_geom = geometry_of(subject)
+    template_geom = geometry_of(template)
 
     subject_path = write_nifti(subject, temp_dir / "tpl_subject.nii.gz")
     template_path = write_nifti(template, temp_dir / "tpl_template.nii.gz")
@@ -380,6 +453,11 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     # direction we need to *apply*, so no inversion is ever required.
     fixed = Image.load_file(str(subject_path), device=device)
     moving = Image.load_file(str(template_path), device=device)
+    # Inbound guards: verify FireANTs' SimpleITK read reproduced the header
+    # ANTsPy wrote. This is the crossing whose geometry is not stamped on by
+    # construction, so it is the one worth asserting.
+    _assert_inbound(subject_geom, fixed, "subject crossing into FireANTs")
+    _assert_inbound(template_geom, moving, "template crossing into FireANTs")
     fixed_batch, moving_batch = BatchedImages([fixed]), BatchedImages([moving])
 
     log.info("Template registration (affine)")
@@ -428,13 +506,14 @@ def apply_warp(
     `interpolation='nearest'` warps raw intensities; 'genericlabel' treats the
     input as a label volume and requires `label_map`.
     """
-    from fireants.interpolator import fireants_interpolator
+    from fireants.interpolator import FFO_AVAILABLE, fireants_interpolator
     from fireants.io import BatchedImages, Image
 
     log = logger or logging.getLogger("ants-nidm.registration")
     temp_dir = Path(temp_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
     reference_geom = geometry_of(reference)
+    moving_geom = geometry_of(moving)
 
     moving_path = write_nifti(moving, temp_dir / "apply_moving.nii.gz")
     coords = warp.warp_parameters()
@@ -442,6 +521,16 @@ def apply_warp(
     if interpolation == "genericlabel":
         if label_map is None:
             raise ValueError("interpolation='genericlabel' requires label_map")
+        onehot = _force_onehot(warp.device, FFO_AVAILABLE)
+        if onehot:
+            log.warning(
+                "genericlabel requested but the fused generic-label sampler is "
+                "unusable here (fused_ops=%s, device=%s); requesting "
+                "is_onehot=True explicitly, costing %d channels",
+                FFO_AVAILABLE,
+                warp.device,
+                label_map.max_index + 1,
+            )
         img = Image.load_file(
             str(moving_path),
             device=warp.device,
@@ -449,7 +538,9 @@ def apply_warp(
             background_seg_label=-1,
             max_seg_label=label_map.max_index,
             seg_preprocessor=_seg_preprocessor(label_map),
+            is_onehot=onehot,
         )
+        _assert_inbound(moving_geom, img, "moving crossing into FireANTs")
         result = fireants_interpolator(
             BatchedImages([img])(),
             **coords,
@@ -459,6 +550,7 @@ def apply_warp(
         array = labels_from_warp_result(result, label_map).astype(np.float32)
     elif interpolation == "nearest":
         img = Image.load_file(str(moving_path), device=warp.device)
+        _assert_inbound(moving_geom, img, "moving crossing into FireANTs")
         result = fireants_interpolator(
             BatchedImages([img])(), **coords, mode="nearest", align_corners=True
         )

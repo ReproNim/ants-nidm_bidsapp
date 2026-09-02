@@ -105,3 +105,32 @@ def test_geometry_of_accepts_itk_style_objects():
     g = geometry_of(FakeANTsImage())
     assert g.shape == (4, 5, 6)
     np.testing.assert_allclose(g.spacing, (0.9, 1.2, 3.0), rtol=1e-6)
+
+
+def test_simpleitk_and_ants_geometries_of_the_same_file_agree(tmp_path, restore_real_ants):
+    """The SimpleITK branch of geometry_of must use the same axis convention as
+    the ANTsImage branch.
+
+    `sitk.GetSize()` is (x, y, z); `sitk.GetArrayFromImage(...).shape` is
+    (z, y, x). Reversing GetSize() made this comparison fail for every
+    non-cubic volume -- invisible while nothing compared the two, and a
+    guaranteed spurious GeometryMismatch the moment the inbound crossing guard
+    in src/registration/fireants.py did. The shape here is deliberately
+    non-cubic; with (4, 4, 4) the bug is undetectable.
+
+    `restore_real_ants` undoes the module-level sys.modules['ants'] MagicMock
+    that tests/test_run.py and tests/test_wrapper.py install at collection
+    time -- without it ants.image_read returns a mock and this passes
+    vacuously when the file is run as part of the whole suite.
+    """
+    ants = pytest.importorskip("ants")
+    sitk = pytest.importorskip("SimpleITK")
+
+    path = tmp_path / "anisotropic.nii.gz"
+    data = np.arange(8 * 10 * 12, dtype=np.float32).reshape(8, 10, 12)
+    nib.save(nib.Nifti1Image(data, OBLIQUE), str(path))
+
+    assert_geometry_match(
+        geometry_of(ants.image_read(str(path))),
+        geometry_of(sitk.ReadImage(str(path))),
+    )

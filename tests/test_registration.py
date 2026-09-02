@@ -84,7 +84,11 @@ def test_folding_fraction_is_zero_for_an_identity_warp():
                                  optimizer="Adam", optimizer_lr=1e-3,
                                  cc_kernel_size=3)
         reg.optimize()
-        assert folding_fraction(reg, batch, batch) < 0.001
+        # One value per batch element, not a batch mean -- see
+        # tests/test_fireants_units.py for why the distinction matters.
+        fractions = folding_fraction(reg, batch, batch)
+        assert len(fractions) == 1
+        assert max(fractions) < 0.001
 
 
 def test_unexpected_channel_count_is_rejected():
@@ -168,11 +172,94 @@ def test_template_warp_moves_template_space_into_subject_space(tmp_path):
     )
 
 
-def test_apply_warp_output_shares_the_reference_geometry(tmp_path):
+def test_fireants_load_preserves_the_ants_header(tmp_path):
+    """The inbound crossing guard, on the direction that can actually differ.
+
+    The *outbound* check -- read_nifti(..., expect=target_geom) on a volume
+    _tensor_to_nifti just stamped with CopyInformation(reference_itk), where
+    reference_itk is that same fixed image -- compares a header with itself.
+    Spacing, origin and direction cannot differ there by construction, so an
+    assertion on it can never fail and proves nothing.
+
+    What is genuinely unverified is whether FireANTs' SimpleITK read
+    reproduced the header ANTsPy wrote. That is what warp_atlases,
+    register_to_template and apply_warp now assert on every load, and what
+    this test exercises: a deliberately nasty affine (anisotropic spacing,
+    non-identity direction, non-zero origin, non-cubic shape) written by
+    ANTsPy and read back by FireANTs.
+    """
+    import nibabel as nib
+
+    from fireants.io import Image
+
+    from src.registration.fireants import _assert_inbound
+    from src.registration.handoff import geometry_of, write_nifti
+
+    ants = pytest.importorskip("ants")
+
+    # Non-cubic on purpose: an (n, n, n) volume hides every axis-order bug.
+    data = np.arange(8 * 10 * 12, dtype=np.float32).reshape(8, 10, 12)
+    affine = np.array([
+        [0.0, -1.2, 0.0, 10.0],
+        [0.9, 0.0, 0.0, -20.0],
+        [0.0, 0.0, 3.0, 5.5],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+    seed = tmp_path / "seed.nii.gz"
+    nib.save(nib.Nifti1Image(data, affine), str(seed))
+    source = ants.image_read(str(seed))
+
+    written = write_nifti(source, tmp_path / "crossing.nii.gz")
+    loaded = Image.load_file(str(written), device="cpu")
+
+    _assert_inbound(geometry_of(source), loaded, "inbound test")
+
+
+def test_inbound_guard_catches_a_reoriented_load(tmp_path):
+    """Negative control: the guard has teeth.
+
+    `fireants.io.Image.__init__` accepts an `orientation` argument that runs
+    sitk.DICOMOrient and rewrites the header (spec section 4 names it as a
+    footgun). Production never passes it -- but if it ever did, or if
+    SimpleITK read the file differently for any other reason, the inbound
+    guard must fail rather than let a silently reoriented volume through.
+    """
+    import nibabel as nib
+
+    from fireants.io import Image
+
+    from src.registration.fireants import _assert_inbound
+    from src.registration.handoff import GeometryMismatch, geometry_of, write_nifti
+
+    ants = pytest.importorskip("ants")
+
+    data = np.arange(8 * 10 * 12, dtype=np.float32).reshape(8, 10, 12)
+    affine = np.diag([1.1, 0.9, 1.3, 1.0])
+    affine[:3, 3] = [3.0, -4.0, 5.0]
+    seed = tmp_path / "seed.nii.gz"
+    nib.save(nib.Nifti1Image(data, affine), str(seed))
+    source = ants.image_read(str(seed))
+
+    written = write_nifti(source, tmp_path / "crossing.nii.gz")
+    reoriented = Image.load_file(str(written), device="cpu", orientation="LPS")
+
+    with pytest.raises(GeometryMismatch) as exc:
+        _assert_inbound(geometry_of(source), reoriented, "inbound test")
+    # Not a shape difference: this reorientation keeps the shape and moves the
+    # origin and direction, which is precisely the silent failure mode.
+    assert "shape" not in str(exc.value)
+
+
+def test_apply_warp_output_lands_on_the_reference_grid(tmp_path):
+    """End-to-end shape agreement between apply_warp's result and the
+    reference. Kept deliberately modest in what it claims: the header of the
+    result is copied from the fixed image, so this can only catch a shape
+    error -- the falsifiable geometry content is in the two inbound tests
+    above.
+    """
     import nibabel as nib
 
     from src.registration.fireants import apply_warp, register_to_template
-    from src.registration.handoff import assert_geometry_match, geometry_of
 
     ants = pytest.importorskip("ants")
 
@@ -201,4 +288,4 @@ def test_apply_warp_output_shares_the_reference_geometry(tmp_path):
         temp_dir=tmp_path / "w",
         interpolation="nearest",
     )
-    assert_geometry_match(geometry_of(paths["subject"]), geometry_of(moved))
+    assert moved.shape == paths["subject"].shape

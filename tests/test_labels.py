@@ -34,21 +34,10 @@ def test_map_spans_the_union_across_atlases(tmp_path):
     assert lm.max_index == 3
 
 
-def test_round_trip_restores_original_ids(tmp_path):
-    a = _write_labels(tmp_path, "a.nii.gz", [0, 4, 11, 30, 1001, 2035])
-    lm = build_label_map([a])
-    original = np.array([[0, 4], [2035, 1001]], dtype=np.int32)
-    np.testing.assert_array_equal(
-        lm.restore_array(lm.remap_array(original)), original
-    )
-
-
-def test_remap_output_is_dense_enough_for_onehot(tmp_path):
-    """The whole point: max index must be small, not 2035."""
-    a = _write_labels(tmp_path, "a.nii.gz", [0, 4, 2035])
-    lm = build_label_map([a])
-    assert lm.remap_array(np.array([2035])).max() == 2
-    assert lm.max_index == 2
+# The remap half of the round trip is tested in tests/test_fireants_units.py
+# against `_seg_preprocessor`, the torch implementation production actually
+# uses. The numpy `LabelMap.remap_array` that used to be tested here was never
+# called by anything but these tests.
 
 
 def test_background_is_never_dropped(tmp_path):

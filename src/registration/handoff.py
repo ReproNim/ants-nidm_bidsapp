@@ -46,8 +46,16 @@ def geometry_of(img):
     if hasattr(img, "affine"):  # nibabel
         return _from_affine(img.affine, img.shape)
     if hasattr(img, "GetSpacing"):  # SimpleITK
+        # GetSize() is already index order (x, y, z) -- the same convention as
+        # ANTsImage.shape and nibabel's .shape, and the one every other branch
+        # here returns. It is *not* the numpy shape of GetArrayFromImage(),
+        # which is reversed; reversing here made a SimpleITK image compare
+        # unequal to the ANTsImage of the very same file whenever the volume
+        # was not cubic. Nothing exercised this branch until the inbound
+        # crossing guard in fireants.py started comparing an
+        # `Image.itk_image` against the ANTsImage it was written from.
         return Geometry(
-            tuple(int(s) for s in reversed(img.GetSize())),
+            tuple(int(s) for s in img.GetSize()),
             tuple(float(s) for s in img.GetSpacing()),
             tuple(float(o) for o in img.GetOrigin()),
             tuple(float(d) for d in img.GetDirection()),

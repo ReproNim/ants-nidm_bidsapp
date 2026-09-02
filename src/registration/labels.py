@@ -27,11 +27,12 @@ class LabelMap:
     def max_index(self):
         return int(self.inverse.size - 1)
 
-    def remap_array(self, a):
-        out = np.zeros_like(a, dtype=np.int32)
-        for original, index in self.forward.items():
-            out[a == original] = index
-        return out
+    # There is deliberately no numpy `remap_array` here. Production remaps on
+    # the torch tensor FireANTs hands to `seg_preprocessor`
+    # (src/registration/fireants.py::_seg_preprocessor); a second numpy
+    # implementation existed only to be tested, which left the live mapping
+    # untested and the tested one dead. `restore_array` below *is* production
+    # code -- labels_from_warp_result calls it on every warped label volume.
 
     def restore_array(self, a):
         a = np.asarray(a, dtype=np.int64)
