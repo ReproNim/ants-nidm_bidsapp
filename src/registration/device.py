@@ -13,13 +13,19 @@ def _torch_cuda_available():
     return torch.cuda.is_available()
 
 
-def resolve_device(requested, cuda_available=None):
+def resolve_device(requested, cuda_probe=None):
     """Return the device to run FireANTs on, or raise.
 
     Deliberately does not fall back to CPU when CUDA is missing. FireANTs on CPU
     is slower than the ANTs code it replaces, so a silent fallback inside a BABS
     array produces hundreds of many-hour jobs that all exit 0. `--device cpu`
     remains available as an explicit opt-in for tests and small debugging runs.
+
+    `cuda_probe` overrides the CUDA check so tests need not install torch. It
+    is a zero-argument callable, but a plain bool is accepted too: the previous
+    name (`cuda_available`) invited `cuda_available=False`, which silently fell
+    through to the real probe -- `False or _torch_cuda_available` is the
+    function -- while `cuda_available=True` raised TypeError on `True()`.
     """
     if requested not in VALID_DEVICES:
         raise ValueError(
@@ -27,8 +33,10 @@ def resolve_device(requested, cuda_available=None):
         )
     if requested == "cpu":
         return "cpu"
-    probe = cuda_available or _torch_cuda_available
-    if not probe():
+    if cuda_probe is None:
+        cuda_probe = _torch_cuda_available
+    available = cuda_probe() if callable(cuda_probe) else bool(cuda_probe)
+    if not available:
         raise DeviceUnavailable(
             "--device cuda was requested but torch.cuda.is_available() is False. "
             "Submit to a GPU partition (e.g. --partition pi_satra --gres=gpu:1) "

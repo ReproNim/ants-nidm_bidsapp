@@ -2,8 +2,14 @@
 
 fireants.utils.imageutils.integer_to_onehot allocates max_label + 1 channels.
 DKT31 ids are sparse and reach 2035, so warping them directly would allocate
-2036 channels -- roughly 136 GB at 256^3. Remapping the ~97 distinct ids onto
-0..96 makes the same operation cost 97 channels.
+2036 channels -- roughly 136 GB at 256^3. The union across the twenty
+OASIS-TRT-20 label volumes is 105 distinct ids including background (measured,
+not estimated: build_label_map over data/OASIS-TRT-20_DKT31_CMA_labels_v2/),
+so remapping them onto 0..104 makes the same operation cost 105 channels.
+
+The count is derived from the data at run time, never hard-coded -- this
+docstring is the only place the number appears, and it is here for orders of
+magnitude, not as a contract.
 
 Background (0) is always mapped to 0 and always present, because FireANTs is
 called with background_seg_label=-1, which builds num_labels = max_label + 1
