@@ -14,6 +14,8 @@ set -euo pipefail
 SIF="${1:?usage: tier3_agreement.sbatch <sif> <out_dir>}"
 OUT="${2:?usage: tier3_agreement.sbatch <sif> <out_dir>}"
 
+SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 DATASET=/orcd/data/satra/002/datasets/simple2_datalad/study-ABIDE/site-Caltech
 BIDS="${DATASET}/sourcedata"
 REFERENCE="${DATASET}/derivatives/babs-ants-nidm"
@@ -32,6 +34,19 @@ for SUB in "${SUBJECTS[@]}"; do
     rm -rf "$WORK"
 done
 
-python3 scripts/tier3_agreement.py \
-    --new "$OUT" --reference "$REFERENCE" \
-    --subjects "${SUBJECTS[@]}" --out "${OUT}/tier3_report.csv"
+# The comparison runs INSIDE the container, via `apptainer exec`.
+#
+# It used to run on the compute node's host interpreter, which has no
+# guaranteed nibabel or numpy and certainly no fireants -- so the expected
+# outcome was ModuleNotFoundError, and the failure mode if numpy and nibabel
+# happened to resolve was worse: surface_metrics silently NaN-filled every
+# surface-Dice and Hausdorff value that spec section 8 requires be reported,
+# and the run still printed TIER 3 PASS. tier3_agreement.py now refuses to
+# start without fireants.scripts.evalutils rather than degrading.
+apptainer exec \
+    --bind "${OUT}:/out" \
+    --bind "${REFERENCE}:/reference:ro" \
+    --bind "${SCRIPTS}:/scripts:ro" \
+    "$SIF" python3 /scripts/tier3_agreement.py \
+    --new /out --reference /reference \
+    --subjects "${SUBJECTS[@]}" --out /out/tier3_report.csv

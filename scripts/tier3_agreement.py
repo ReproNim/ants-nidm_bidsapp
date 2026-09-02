@@ -58,23 +58,56 @@ def dice(a, b, label):
     return float("nan") if denom == 0 else 2.0 * np.logical_and(x, y).sum() / denom
 
 
-def surface_metrics(new, ref, label, voxel_mm3):
-    """Surface Dice at 1 mm and 95th-percentile Hausdorff, via FireANTs' own
-    evaluation harness.
+def load_evalutils():
+    """Import FireANTs' evaluation harness, or exit loudly.
 
-    Reported, not gated: no reference distribution exists for them yet. They
-    catch boundary degradation that volumetric Dice hides on large structures,
-    and establish the baseline for future runs (spec section 8).
+    This used to be a per-call `try: ... except ImportError: return empty`,
+    which turned "the harness is not installed" into a report where every
+    surface-Dice and Hausdorff column was NaN -- and the run still printed
+    TIER 3 PASS. Spec section 8 requires those metrics be reported for every
+    gated label, so a missing harness is a failure of the run, not a column of
+    blanks. Resolved once, up front, before any subject is read.
     """
-    empty = {"surface_dice_1mm": float("nan"), "hausdorff95_mm": float("nan")}
     try:
         from fireants.scripts.evalutils import (
             compute_robust_hausdorff,
             compute_surface_dice_at_tolerance,
             compute_surface_distances,
         )
-    except ImportError:
-        return empty
+    except ImportError as exc:
+        sys.exit(
+            "cannot import fireants.scripts.evalutils "
+            f"({exc}). Spec section 8 requires surface Dice and Hausdorff for "
+            "every gated label, so this run cannot produce a valid report. "
+            "Run this script inside the container -- "
+            "`apptainer exec <sif> python3 /scripts/tier3_agreement.py ...` -- "
+            "not on the compute node's host interpreter."
+        )
+    return (
+        compute_surface_distances,
+        compute_surface_dice_at_tolerance,
+        compute_robust_hausdorff,
+    )
+
+
+def surface_metrics(evalutils, new, ref, label, voxel_mm3):
+    """Surface Dice at 1 mm and 95th-percentile Hausdorff, via FireANTs' own
+    evaluation harness.
+
+    Reported, not gated: no reference distribution exists for them yet. They
+    catch boundary degradation that volumetric Dice hides on large structures,
+    and establish the baseline for future runs (spec section 8).
+
+    A NaN here means the label is absent from one of the two segmentations --
+    a genuine property of the data. It never means the harness was missing;
+    load_evalutils() has already exited in that case.
+    """
+    (
+        compute_surface_distances,
+        compute_surface_dice_at_tolerance,
+        compute_robust_hausdorff,
+    ) = evalutils
+    empty = {"surface_dice_1mm": float("nan"), "hausdorff95_mm": float("nan")}
 
     a, b = (new == label), (ref == label)
     if not a.any() or not b.any():
@@ -112,6 +145,10 @@ def main():
     parser.add_argument("--out", default="tier3_report.csv")
     args = parser.parse_args()
 
+    # Before anything expensive: a missing evaluation harness must stop the
+    # run, not silently blank half the report.
+    evalutils = load_evalutils()
+
     stats, n_ref = reference_label_stats(args.reference)
     print(f"reference: {n_ref} subjects, {len(stats)} labels")
 
@@ -141,7 +178,7 @@ def main():
             dv = (float((new == label).sum()) - float((ref == label).sum())) * voxel_mm3
             tier = ("primary" if label in primary
                     else "relaxed" if label in relaxed else "report_only")
-            surface = surface_metrics(new, ref, label, voxel_mm3)
+            surface = surface_metrics(evalutils, new, ref, label, voxel_mm3)
             rows.append({
                 "subject": subject, "label": label, "tier": tier,
                 "dice": d, "delta_volume_mm3": dv,
@@ -171,6 +208,17 @@ def main():
         print(f"sub-{subject}: BVOL {bvol_l:.2f} L")
         if not BVOL_RANGE_L[0] <= bvol_l <= BVOL_RANGE_L[1]:
             failures.append(f"sub-{subject}: BVOL {bvol_l:.2f} L outside {BVOL_RANGE_L}")
+
+    if not rows:
+        # `rows[0]` here used to raise a bare IndexError, discarding the
+        # `failures` list that explains exactly why nothing was comparable
+        # (every subject shape-mismatched against the reference, typically).
+        print("\nTIER 3 FAIL: no subject produced a comparable segmentation")
+        for line in failures:
+            print(f"  {line}")
+        if not failures:
+            print("  no subjects given, or no labels survived exclusion")
+        sys.exit(1)
 
     with open(args.out, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
