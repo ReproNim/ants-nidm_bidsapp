@@ -32,7 +32,8 @@ def _write_labels(tmp_path, name, values):
 # --------------------------------------------------------------------------
 
 def test_chunks_of_zero_or_negative_is_one_full_batch():
-    """batch_size=0 is the production default and means "all at once"."""
+    """batch_size=0 means "all at once". It was the production default until
+    tier 2 (2026-09-07) showed 20 atlases at once OOM an 80 GB A100."""
     items = list(range(5))
     assert _chunks(items, 0) == [items]
     assert _chunks(items, -1) == [items]
@@ -107,7 +108,7 @@ def test_folding_is_reported_per_batch_element_not_as_one_mean():
     """A single atlas folding on 2% of its voxels must be reported as 2%.
 
     Flattening [N, ...] to -1 and taking one mean turns that into a 0.02/20 =
-    0.1% batch mean at the default batch_size=0, which sits on the gate rather
+    0.1% batch mean at batch_size=0 (all twenty), which sits on the gate rather
     than tripping it.
     """
     torch = pytest.importorskip("torch")

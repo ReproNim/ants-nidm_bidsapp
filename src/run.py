@@ -242,8 +242,11 @@ def parse_arguments():
     parser.add_argument('--device', help='Compute device for registration [default: cuda]',
                         choices=['cuda', 'cpu'], default='cuda')
     parser.add_argument('--fireants-batch-size', dest='fireants_batch_size',
-                        help='Atlases registered per batch; 0 registers all at once [default: 0]',
-                        type=int, default=0)
+                        help='Atlases registered per batch under --method fusion; 0 registers '
+                             'all at once [default: 5]. All twenty at once needs more than 80 GB '
+                             'of GPU memory (tier-2 OOM on an A100 80GB, 2026-09-07), so the '
+                             'default is sized to fit a 40 GB card',
+                        type=int, default=5)
     # Without built fused_ops, or on CPU, genericlabel degrades to a one-hot
     # return that warp_atlases argmaxes; see fireants/io/image.py:145-147.
     parser.add_argument('--label-interpolation', dest='label_interpolation',

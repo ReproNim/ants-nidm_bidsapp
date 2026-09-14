@@ -573,7 +573,7 @@ class TestRun(unittest.TestCase):
         with patch.object(sys, "argv", argv):
             args = parse_arguments()
         self.assertEqual(args.device, "cuda")
-        self.assertEqual(args.fireants_batch_size, 0)
+        self.assertEqual(args.fireants_batch_size, 5)
         self.assertEqual(args.label_interpolation, "genericlabel")
 
     def test_device_and_engine_options_are_parsed(self):

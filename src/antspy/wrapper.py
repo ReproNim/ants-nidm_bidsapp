@@ -32,7 +32,7 @@ class ANTsSegmentation:
                  prob_threshold=0.5,
                  num_threads=1,
                  device='cuda',
-                 fireants_batch_size=0,
+                 fireants_batch_size=5,
                  label_interpolation='genericlabel',
                  verbose=False):
         """Initialize ANTs segmentation.
@@ -54,7 +54,8 @@ class ANTsSegmentation:
         device : str
             Compute device for FireANTs registration ('cuda' or 'cpu')
         fireants_batch_size : int
-            Batch size for FireANTs atlas warping (0 = all atlases in one batch)
+            Atlases per FireANTs registration batch (0 = all at once). 20 at once
+            exceeds 80 GB of GPU memory; 5 keeps peak use under ~20 GB
         label_interpolation : str
             Interpolation mode FireANTs uses when warping atlas labels
         verbose : bool

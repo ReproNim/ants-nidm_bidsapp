@@ -289,3 +289,199 @@ def test_apply_warp_output_lands_on_the_reference_grid(tmp_path):
         interpolation="nearest",
     )
     assert moved.shape == paths["subject"].shape
+
+
+def _write_box(path, shape, box, value=1.0, dtype=np.float32):
+    import nibabel as nib
+
+    arr = np.zeros(shape, dtype=dtype)
+    arr[box] = value
+    nib.save(nib.Nifti1Image(arr, np.eye(4)), str(path))
+    return path
+
+
+@pytest.fixture
+def fast_registration(monkeypatch):
+    """Cut the multi-resolution schedule to a handful of iterations. These
+    tests check batch plumbing, not registration quality."""
+    from src.registration import fireants as mod
+
+    monkeypatch.setattr(mod, "AFFINE_ITERATIONS", [2, 1, 1])
+    monkeypatch.setattr(mod, "SYN_ITERATIONS", [2, 1, 1])
+
+
+def _atlas_set(tmp_path, n, shape=(32, 32, 32)):
+    """n atlases (shifted boxes) with sparse DKT-style label ids."""
+    atlases, labels = [], []
+    for k in range(n):
+        s = 8 + k
+        atlases.append(_write_box(tmp_path / f"atlas{k}.nii.gz", shape,
+                                  (slice(s, s + 8), slice(8, 16), slice(8, 16))))
+        labels.append(_write_box(tmp_path / f"labels{k}.nii.gz", shape,
+                                 (slice(s, s + 8), slice(8, 16), slice(8, 16)),
+                                 value=1002 + k, dtype=np.int32))
+    return atlases, labels
+
+
+@pytest.mark.parametrize("n_atlases,batch_size", [(2, 0), (3, 2)])
+def test_warp_atlases_registers_a_batch_against_one_fixed_image(
+    tmp_path, fast_registration, n_atlases, batch_size
+):
+    """Tier-2 regression (job 22184095, 2026-09-07): one fixed image against
+    N batched atlases raised
+
+        ground truth has differing shape (torch.Size([1, 1, ...])) from pred
+        (torch.Size([20, 1, ...]))
+
+    inside fireants' CC loss. FireANTs' registration accepts a fixed batch of 1
+    as "broadcastable" at construction, but the loss compares shapes strictly
+    and BatchedImages only expands to N once the caller invokes
+    `.broadcast(N)` -- which is what fireants' own template builder does per
+    batch. (3, 2) covers a trailing partial chunk, which must be broadcast to
+    its own size, not the previous chunk's.
+    """
+    from src.registration.fireants import warp_atlases
+
+    ants = pytest.importorskip("ants")
+
+    shape = (32, 32, 32)
+    target_path = _write_box(tmp_path / "target.nii.gz", shape,
+                             (slice(10, 18), slice(8, 16), slice(8, 16)))
+    mask_path = _write_box(tmp_path / "mask.nii.gz", shape,
+                           (slice(4, 28), slice(4, 28), slice(4, 28)))
+    atlases, labels = _atlas_set(tmp_path, n_atlases, shape)
+
+    warped_atlases, warped_labels = warp_atlases(
+        ants.image_read(str(target_path)),
+        ants.image_read(str(mask_path)),
+        atlases,
+        labels,
+        temp_dir=tmp_path / "work",
+        device="cpu",
+        batch_size=batch_size,
+        label_interpolation="nearest",
+    )
+
+    assert len(warped_atlases) == n_atlases
+    assert len(warped_labels) == n_atlases
+    for k, lab in enumerate(warped_labels):
+        ids = set(np.unique(lab.numpy()).astype(int)) - {0}
+        assert ids == {1002 + k}, f"atlas {k} labels came back as {ids}"
+
+
+@pytest.mark.parametrize("masked,moving_mask,mode", [
+    (False, "brain", "mult"), (True, "brain", "mult"), (True, "all", "mult"), (True, "brain", "max"),
+], ids=["cc", "masked_cc", "masked_fixed_only", "masked_max"])
+def test_warp_atlases_recovers_a_large_physical_offset(tmp_path, fast_registration, monkeypatch, masked, moving_mask, mode):
+    """Diagnostic 22188503 (2026-09-07): every OASIS-TRT-20 atlas brain sits
+    50-70 mm from the subject brain in physical space (the OASIS-30 template,
+    ~200 mm), and the affine started from identity, so the atlases never
+    reached the subject: warped atlases covered 26-50% of the target brain,
+    in-mask NCC 0.09-0.22, single-atlas label Dice ~0 against the delivered
+    derivative. ANTs' SyNRA begins with a centre-of-mass initial transform;
+    FireANTs offers the same via MomentsRegistration. This test puts the atlas
+    box 40 mm away through its header alone -- same voxel content, shifted
+    origin -- which identity initialisation cannot recover on a 32-voxel grid.
+    """
+    import nibabel as nib
+
+    from src.registration import fireants as mod
+    from src.registration.fireants import warp_atlases
+
+    ants = pytest.importorskip("ants")
+    monkeypatch.setattr(mod, "LOSS_MASKED", masked)
+    monkeypatch.setattr(mod, "LOSS_MASK_MOVING", moving_mask)
+    monkeypatch.setattr(mod, "LOSS_MASK_MODE", mode)
+
+    shape = (32, 32, 32)
+    box = (slice(10, 18), slice(10, 18), slice(10, 18))
+    target_path = _write_box(tmp_path / "target.nii.gz", shape, box)
+    mask_path = _write_box(tmp_path / "mask.nii.gz", shape,
+                           (slice(4, 28), slice(4, 28), slice(4, 28)))
+
+    shifted = np.eye(4)
+    shifted[0, 3] = 40.0  # header origin only: the box is physically 40 mm away
+    arr = np.zeros(shape, dtype=np.float32)
+    arr[box] = 1.0
+    lab = np.zeros(shape, dtype=np.int32)
+    lab[box] = 1002
+    nib.save(nib.Nifti1Image(arr, shifted), str(tmp_path / "atlas.nii.gz"))
+    nib.save(nib.Nifti1Image(lab, shifted), str(tmp_path / "labels.nii.gz"))
+
+    _, warped_labels = warp_atlases(
+        ants.image_read(str(target_path)),
+        ants.image_read(str(mask_path)),
+        [tmp_path / "atlas.nii.gz"],
+        [tmp_path / "labels.nii.gz"],
+        temp_dir=tmp_path / "work",
+        device="cpu",
+        batch_size=0,
+        label_interpolation="nearest",
+    )
+
+    got = warped_labels[0].numpy() == 1002
+    want = np.zeros(shape, dtype=bool)
+    want[box] = True
+    dice = 2 * np.logical_and(got, want).sum() / max(1, got.sum() + want.sum())
+    assert dice > 0.8, (
+        f"warped atlas label Dice {dice:.3f} against the target box "
+        f"({int(got.sum())} label voxels): the 40 mm header offset was not "
+        "recovered -- registration needs a centre-of-mass initialisation"
+    )
+
+
+@pytest.mark.parametrize("deformable", ["syn", "greedy"])
+def test_warp_atlases_handles_a_reoriented_atlas_header(tmp_path, fast_registration, monkeypatch, deformable):
+    """The OASIS-TRT-20 atlases are stored ASL; subjects arrive LAS. The same
+    physical box, stored under a permuted/flipped axis order, must register
+    onto the target with no search at all -- in physical space it already
+    sits there. If direction cosines were ignored anywhere on the FireANTs
+    side, the box would come back rotated and Dice would collapse. The box is
+    elongated (12x6x3) so a wrong axis order cannot pass by symmetry.
+    """
+    import nibabel as nib
+
+    from src.registration import fireants as mod
+    from src.registration.fireants import warp_atlases
+
+    ants = pytest.importorskip("ants")
+    monkeypatch.setattr(mod, "DEFORMABLE", deformable)
+    monkeypatch.setattr(mod, "GREEDY_ITERATIONS", [2, 1, 1])
+
+    shape = (32, 32, 32)
+    box = (slice(10, 22), slice(13, 19), slice(15, 18))
+    target_path = _write_box(tmp_path / "target.nii.gz", shape, box)
+    mask_path = _write_box(tmp_path / "mask.nii.gz", shape,
+                           (slice(4, 28), slice(4, 28), slice(4, 28)))
+
+    arr = np.zeros(shape, dtype=np.float32)
+    arr[box] = 1.0
+    lab = np.zeros(shape, dtype=np.int32)
+    lab[box] = 1002
+    ras_to_asl = nib.orientations.ornt_transform(
+        nib.io_orientation(np.eye(4)), nib.orientations.axcodes2ornt(("A", "S", "L")))
+    atlas = nib.Nifti1Image(arr, np.eye(4)).as_reoriented(ras_to_asl)
+    labels = nib.Nifti1Image(lab, np.eye(4)).as_reoriented(ras_to_asl)
+    assert nib.aff2axcodes(atlas.affine) == ("A", "S", "L")
+    nib.save(atlas, str(tmp_path / "atlas.nii.gz"))
+    nib.save(labels, str(tmp_path / "labels.nii.gz"))
+
+    _, warped_labels = warp_atlases(
+        ants.image_read(str(target_path)),
+        ants.image_read(str(mask_path)),
+        [tmp_path / "atlas.nii.gz"],
+        [tmp_path / "labels.nii.gz"],
+        temp_dir=tmp_path / "work",
+        device="cpu",
+        batch_size=0,
+        label_interpolation="nearest",
+    )
+
+    got = warped_labels[0].numpy() == 1002
+    want = np.zeros(shape, dtype=bool)
+    want[box] = True
+    dice = 2 * np.logical_and(got, want).sum() / max(1, got.sum() + want.sum())
+    assert dice > 0.8, (
+        f"Dice {dice:.3f} for an ASL-stored atlas against a RAS target: "
+        "direction cosines are not being honoured somewhere in the FireANTs path"
+    )

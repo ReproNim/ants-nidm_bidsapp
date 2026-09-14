@@ -28,7 +28,12 @@ PINNED = {
 # substring search finds the comment first and any ordering check on it is
 # meaningless.
 BUILD_EXT_CMD = r"python3 setup\.py build_ext"
-FUSED_OPS_ASSERTION_CMD = r'python3 -c "import fireants_fused_ops'
+# `import torch` must come first: the extension links against torch/lib/libc10.so
+# without an rpath, so a bare `import fireants_fused_ops` fails with
+# "libc10.so: cannot open shared object file" even when the build is perfect
+# (build job 22183323 on 2026-09-07 failed exactly there). FireANTs always has
+# torch loaded before touching the extension, so torch-first is the real path.
+FUSED_OPS_ASSERTION_CMD = r'python3 -c "import torch, fireants_fused_ops'
 
 
 @pytest.mark.parametrize("name,pattern", sorted(PINNED.items()))
@@ -64,7 +69,8 @@ def test_build_verifies_fused_ops(text, name):
     check = re.search(FUSED_OPS_ASSERTION_CMD, text)
     assert build, f"{name} must build fused_ops with `python3 setup.py build_ext`"
     assert check, (
-        f'{name} must assert `python3 -c "import fireants_fused_ops"` succeeds'
+        f'{name} must assert `python3 -c "import torch, fireants_fused_ops"` '
+        "succeeds (torch first, or the import fails on libc10.so)"
     )
     assert check.start() > build.start(), (
         f"{name} must assert the extension imports *after* building it"

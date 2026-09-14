@@ -49,11 +49,131 @@ SYN_ITERATIONS = [200, 100, 50]
 SYN_LR = 0.5
 CC_KERNEL_SIZE = 5
 SMOOTH_GRAD_SIGMA = 1.0
-SMOOTH_WARP_SIGMA = 0.5
+# 1.0, not SyNRegistration's documented default of 0.5: on Caltech sub-0051456
+# (diagnostic 22191183, 2026-09-07) 0.5 folded up to 0.54% of voxels on some
+# atlases while 1.0 folded none, at identical coverage/NCC/Dice.
+SMOOTH_WARP_SIGMA = 1.0
+
+# Deformable algorithm for the atlas registrations: "greedy" (FireANTs'
+# primary algorithm, tuned against its own OASIS hyperparameters) or "syn"
+# (symmetric; the spec's original choice as the closer analogue to SyNRA).
+# Round 5/6 tuning (jobs 22320466, 22321551, 2026-09-08) on Caltech
+# sub-0051456 found SyN plateaus at primary-label median Dice 0.81 across ten
+# configurations (iterations, masking, metric, smoothing, schedule depth) --
+# the optimiser had converged, so more effort could not close the gap. Greedy
+# with FireANTs' own OASIS schedule reached 0.852 with zero folding at less
+# than half the registration time (141s vs ~250s for 20 atlases). Ten further
+# Greedy variants (kernel 5/9, lr 0.25/1.0, warp/grad sigma, 400 iterations,
+# nearest labels) did not improve on the baseline Greedy config below -- it
+# had also converged. Four primary labels (41, 40, 1021, 2019) and two
+# relaxed labels (49, 50) still miss the per-label floor on that one subject;
+# see [[fireants-registration-root-causes-sep7]]. Same API on both classes
+# (optimize / evaluate / get_warp_parameters / .affine), so the folding gate
+# and label warps are unchanged either way. GREEDY_* mirror FireANTs'
+# scripts/pairwise/oasis.py schedule and GreedyRegistration defaults.
+DEFORMABLE = "greedy"
+GREEDY_SCALES = [4, 2, 1]
+GREEDY_ITERATIONS = [250, 200, 100]
+GREEDY_LR = 0.5
+GREEDY_CC_KERNEL_SIZE = 7
 
 # Spec section 8 criterion 7. A folding warp is provably bad independently of
 # Dice; the ANTs path being replaced had no equivalent check.
 MAX_FOLDING_FRACTION = 0.001
+
+# Centre-of-mass initialisation before the affine. The ANTs path being replaced
+# (SyNRA) starts every registration from antsRegistration's default
+# initial-moving-transform, which aligns centres of mass; FireANTs starts from
+# identity unless told otherwise. That matters here: every OASIS-TRT-20 atlas
+# brain sits 50-70 mm from a typical subject brain in physical space and the
+# OASIS-30 template ~200 mm, and with both sides skull-stripped the CC loss
+# saturates on the shared zero background, so the affine never closes that gap
+# (diagnostic 22188503, 2026-09-07: warped atlases covered 26-50% of the target
+# brain, in-mask NCC 0.09-0.22, label Dice ~0). MomentsRegistration with
+# moments=1 and transl_mode="com" is FireANTs' equivalent of ANTs' default;
+# scale 4 matches FireANTs' own oasis_deformable.yaml.
+MOMENTS_INIT = True
+MOMENTS_SCALE = 4
+# FireANTs' AffineRegistration default. tutorial1's 3e-3 was the original
+# value; with the masked loss below, 3e-2 gave affine-stage coverage 0.89 (min
+# 0.82) vs 0.88 (min 0.79) and Dice 0.40 vs 0.37 (diagnostic 22191183). With
+# the UNMASKED loss 3e-2 is harmful (one atlas fell to 6% coverage), so the two
+# settings go together.
+AFFINE_LR = 3e-2
+# Restrict the CC metric to brain: FireANTs' "masked_cc" expects the mask as a
+# trailing image channel on BOTH sides and multiplies the two (maskedutils).
+# Both sides here are skull-stripped, so ~85% of the fixed FOV and ~87% of an
+# atlas FOV are zero on both sides; the local CC of two all-zero patches is
+# perfect agreement, which is why the unmasked affine reported -0.94 while the
+# brains barely overlapped (diagnostic 22188503). Masking took affine-stage
+# coverage from 0.66 (min 0.29) to 0.88 (min 0.79) and majority-vote Dice
+# against the delivered derivative from 0.21 to 0.37 (diagnostic 22191183).
+LOSS_MASKED = True
+# Similarity metric for affine and SyN. "cc" is what FireANTs' tutorial and its
+# OASIS config use; the ANTs SyNRA path being replaced used mattes (MI) for
+# both stages (main:src/antspy/wrapper.py aff_metric/syn_metric='mattes').
+LOSS_TYPE = "cc"
+# How the two mask channels combine (fireants.losses.maskedutils): "mult" scores
+# only voxels that are brain on BOTH sides, so subject brain the atlas fails to
+# reach contributes nothing and nothing pulls the atlas outward; "max" scores
+# the union. LOSS_MASK_MOVING selects the moving-side channel: "brain" (atlas >
+# 0) or "all" (ones), the latter making the fixed mask alone define the metric
+# domain, as antsRegistration's -x fixed_mask does.
+# "max" (union of the two brain masks), not "mult" (intersection): "mult"
+# gives zero loss gradient over subject brain the atlas has not yet reached,
+# which was the single biggest lever in the Sep 7 sweep (round 4, job
+# 22311946) -- affine-stage coverage 0.66->0.88, though Dice alone plateaued
+# at 0.81 until Greedy (above) closed the rest of the gap.
+LOSS_MASK_MODE = "max"
+LOSS_MASK_MOVING = "brain"
+
+
+def _with_mask_channel(image, mask_array=None):
+    """Return `image` with a binary mask as a trailing channel (masked_cc).
+
+    `mask_array` is a tensor on the image's grid; defaults to image > 0, which
+    is the brain for a skull-stripped atlas.
+    """
+    import copy
+
+    import torch
+
+    mask_img = copy.copy(image)
+    arr = image.array
+    if mask_array is not None:
+        mask_img.array = mask_array.to(arr.dtype)
+    elif LOSS_MASK_MOVING == "all":
+        mask_img.array = torch.ones_like(arr)
+    else:
+        mask_img.array = (arr > 0).to(arr.dtype)
+    mask_img.channels = 1
+    return image.concatenate(mask_img, optimize_memory=False)
+
+
+def _loss_kwargs():
+    kw = {"loss_type": ("masked_" if LOSS_MASKED else "") + LOSS_TYPE}
+    if LOSS_MASKED:
+        # A fresh dict per call: AbstractRegistration mutates loss_params.
+        kw["loss_params"] = {"mask_mode": LOSS_MASK_MODE}
+    return kw
+
+
+def _moments_init(fixed_batch, moving_batch):
+    """Centre-of-mass alignment as an affine init tensor, or None if disabled."""
+    if not MOMENTS_INIT:
+        return None
+    from fireants.registration.moments import MomentsRegistration
+
+    moments = MomentsRegistration(
+        scale=MOMENTS_SCALE,
+        fixed_images=fixed_batch,
+        moving_images=moving_batch,
+        moments=1,
+        transl_mode="com",
+        cc_kernel_size=CC_KERNEL_SIZE,
+    )
+    moments.optimize()
+    return moments.get_affine_init().detach()
 
 
 def labels_from_warp_result(tensor, label_map):
@@ -242,15 +362,36 @@ def warp_atlases(
     # fixed image compares a header with itself. What is genuinely unverified
     # is what SimpleITK made of the file ANTsPy just wrote.
     _assert_inbound(target_geom, fixed, "target crossing into FireANTs")
-    fixed_batch = BatchedImages([fixed])
     reference_itk = fixed.itk_image
+    # Moments (centre of mass) is computed on the plain image; the masked loss,
+    # if enabled, sees image + brain-mask channels.
+    moments_fixed_batch = BatchedImages([fixed])
+    if LOSS_MASKED:
+        mask_path = write_nifti(target_mask, temp_dir / "target_mask.nii.gz")
+        fixed_mask = Image.load_file(str(mask_path), device=device)
+        fixed_batch = BatchedImages([_with_mask_channel(fixed, fixed_mask.array > 0.5)])
+    else:
+        fixed_batch = moments_fixed_batch
 
     warped_atlases, warped_labels = [], []
     index = 0
     for chunk in _chunks(list(zip(atlas_paths, label_paths)), batch_size):
-        moving_batch = BatchedImages(
-            [Image.load_file(str(a), device=device) for a, _ in chunk]
+        moving_images = [Image.load_file(str(a), device=device) for a, _ in chunk]
+        moments_moving_batch = BatchedImages(moving_images)
+        moving_batch = (
+            BatchedImages([_with_mask_channel(m) for m in moving_images])
+            if LOSS_MASKED else moments_moving_batch
         )
+        # One fixed image against len(chunk) moving ones. FireANTs' registration
+        # accepts a fixed batch of 1 as "broadcastable" at construction, but
+        # its losses compare fixed and moving shapes strictly, and
+        # BatchedImages.__call__ only expands the batch to N after broadcast(N)
+        # -- without it tier 2 died with "ground truth has differing shape
+        # ([1,1,...]) from pred ([20,1,...])". This is what FireANTs' own
+        # template builder does before each batch. Re-issued per chunk because
+        # a trailing partial chunk is smaller than the ones before it.
+        fixed_batch.broadcast(len(chunk))
+        moments_fixed_batch.broadcast(len(chunk))
         log.info("Registering %d atlases (affine)", len(chunk))
         affine = AffineRegistration(
             AFFINE_SCALES,
@@ -258,28 +399,53 @@ def warp_atlases(
             fixed_batch,
             moving_batch,
             optimizer="Adam",
-            optimizer_lr=3e-3,
+            optimizer_lr=AFFINE_LR,
             cc_kernel_size=CC_KERNEL_SIZE,
+            init_rigid=_moments_init(moments_fixed_batch, moments_moving_batch),
+            **_loss_kwargs(),
         )
         affine.optimize()
 
-        log.info("Registering %d atlases (SyN)", len(chunk))
-        syn = SyNRegistration(
-            SYN_SCALES,
-            SYN_ITERATIONS,
-            fixed_batch,
-            moving_batch,
-            deformation_type="compositive",
-            optimizer="Adam",
-            optimizer_lr=SYN_LR,
-            cc_kernel_size=CC_KERNEL_SIZE,
-            smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
-            smooth_warp_sigma=SMOOTH_WARP_SIGMA,
-            init_affine=affine.get_affine_matrix().detach(),
-        )
+        if DEFORMABLE == "greedy":
+            from fireants.registration.greedy import GreedyRegistration
+
+            log.info("Registering %d atlases (Greedy)", len(chunk))
+            syn = GreedyRegistration(
+                GREEDY_SCALES,
+                GREEDY_ITERATIONS,
+                fixed_batch,
+                moving_batch,
+                deformation_type="compositive",
+                optimizer="Adam",
+                optimizer_lr=GREEDY_LR,
+                cc_kernel_size=GREEDY_CC_KERNEL_SIZE,
+                smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
+                smooth_warp_sigma=SMOOTH_WARP_SIGMA,
+                init_affine=affine.get_affine_matrix().detach(),
+                **_loss_kwargs(),
+            )
+        elif DEFORMABLE == "syn":
+            log.info("Registering %d atlases (SyN)", len(chunk))
+            syn = SyNRegistration(
+                SYN_SCALES,
+                SYN_ITERATIONS,
+                fixed_batch,
+                moving_batch,
+                deformation_type="compositive",
+                optimizer="Adam",
+                optimizer_lr=SYN_LR,
+                cc_kernel_size=CC_KERNEL_SIZE,
+                smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
+                smooth_warp_sigma=SMOOTH_WARP_SIGMA,
+                init_affine=affine.get_affine_matrix().detach(),
+                **_loss_kwargs(),
+            )
+        else:
+            raise ValueError(f"DEFORMABLE must be 'syn' or 'greedy', got {DEFORMABLE!r}")
         syn.optimize()
 
-        moved = syn.evaluate(fixed_batch, moving_batch)
+        # [N, C, ...]; with the masked loss C == 2 and channel 1 is the mask.
+        moved = syn.evaluate(fixed_batch, moving_batch)[:, :1]
 
         # Checked per atlas, not as a batch mean: one folding atlas among
         # twenty clean ones is invisible in the average (spec section 8
@@ -395,7 +561,28 @@ def folding_fraction(registration, fixed_batch, moving_batch):
 
     warp = registration.get_warped_coordinates(fixed_batch, moving_batch)
     jac = jacobian(warp).permute(0, 2, 3, 4, 1, 5)[:, 1:-1, 1:-1, 1:-1, :]
-    return folding_fractions_from_det(torch.linalg.det(jac))
+    det = torch.linalg.det(jac)
+    # `warp` maps fixed torch coordinates to moving torch coordinates, so its
+    # linear part is moving_phy2torch @ affine @ fixed_torch2phy (syn.py's
+    # affine_map_init). When the two headers differ by a reflection -- an odd
+    # axis permutation or a flip, e.g. an RAS subject against the ASL-stored
+    # OASIS atlases -- that determinant is negative everywhere for a perfect
+    # rigid transform, and a raw `det <= 0` test reports 100% folding. Folding
+    # is a sign *change* relative to that global orientation, so normalise by
+    # it. (LAS subjects happened to reach ASL by an even permutation, which is
+    # why Caltech never tripped this.)
+    # Linear parts only: translations do not enter the Jacobian, and
+    # AffineRegistration stores a [N, D, D+1] matrix where SyN stores [N, D+1, D+1].
+    d = det.ndim - 1
+    lin = torch.matmul(
+        moving_batch.get_phy2torch()[:, :d, :d].to(det.dtype),
+        torch.matmul(registration.affine[:, :d, :d].to(det.dtype),
+                     fixed_batch.get_torch2phy()[:, :d, :d].to(det.dtype)),
+    )
+    orientation_sign = torch.sign(torch.linalg.det(lin))
+    if orientation_sign.shape[0] != det.shape[0]:
+        orientation_sign = orientation_sign.expand(det.shape[0])
+    return folding_fractions_from_det(det * orientation_sign.view(-1, 1, 1, 1))
 
 
 class TemplateWarp:
@@ -467,8 +654,9 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
         fixed_batch,
         moving_batch,
         optimizer="Adam",
-        optimizer_lr=3e-3,
+        optimizer_lr=AFFINE_LR,
         cc_kernel_size=CC_KERNEL_SIZE,
+        init_rigid=_moments_init(fixed_batch, moving_batch),
     )
     affine.optimize()
 
