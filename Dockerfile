@@ -55,8 +55,8 @@ RUN pip3 install --no-cache-dir \
 # CUDA torch + FireANTs. Registration is GPU-only; see
 # docs/superpowers/specs/2026-09-01-fireants-engine-design.md.
 RUN pip3 install --no-cache-dir \
-        --extra-index-url https://download.pytorch.org/whl/cu121 \
-        "torch>=2.3.0" && \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        "torch==2.5.1+cu121" && \
     pip3 install --no-cache-dir fireants==1.5.0 "SimpleITK>=2.2.1"
 
 # The fused CUDA ops are NOT included by `pip install fireants` and must be
@@ -69,7 +69,7 @@ RUN git clone --depth 1 --branch v1.5.0 https://github.com/rohitrango/FireANTs.g
     python3 setup.py build_ext && \
     python3 setup.py install && \
     cd / && rm -rf /tmp/fireants-src && \
-    python3 -c "import fireants_fused_ops; print('fused ops OK')"
+    python3 -c "import torch, fireants_fused_ops; print('fused ops OK')"
 
 # Canonical ANTs binaries, pinned release. The wrapper shells out to
 # antsBrainExtraction.sh (the published extraction method the OASIS-30

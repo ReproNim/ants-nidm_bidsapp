@@ -33,9 +33,18 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     # Name the deployment targets explicitly: A100 (sm_80) and H100 (sm_90).
     export TORCH_CUDA_ARCH_LIST="8.0;9.0"
 
-    # Update and install basic system dependencies
-    apt update && \
-    apt install -y \
+    # Update and install basic system dependencies. Separate statements, not
+    # one `a && b && c` chain: `set -e` does not fire on a non-final command
+    # of an && list, so a failed `apt update` used to be swallowed and the
+    # build carried on to `python3: not found` (exit 127) with no clue why.
+    # Rootless build support: with no /etc/subuid entry for the building user,
+    # apptainer falls back to a single-uid root-mapped namespace, and apt's
+    # privilege drop to `_apt` (setgroups/seteuid) then fails with "Operation
+    # not permitted" and the https method dies. Keep apt running as root.
+    mkdir -p /etc/apt/apt.conf.d
+    echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99-rootless-build
+    apt-get update
+    apt-get install -y \
         python3.10 \
         python3.10-dev \
         python3-pip \
@@ -46,9 +55,9 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
         git \
         wget \
         unzip \
-        bc \
-        && apt clean && \
-        rm -rf /var/lib/apt/lists/*
+        bc
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
 
     # Create symbolic links for python3.10 if they don't exist
     # -f as well as the guard: under `set -e` a plain `ln -s` onto an
@@ -70,9 +79,14 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
 
     # CUDA torch + FireANTs. Registration is GPU-only; see
     # docs/superpowers/specs/2026-09-01-fireants-engine-design.md.
+    # --index-url, not --extra-index-url, and an exact pin. With the extra
+    # index pip takes the newest torch across BOTH indices; on 2026-09-07 that
+    # resolved to torch 2.14.0 from PyPI with CUDA 13 wheels, a major-version
+    # mismatch with the 12.1 nvcc in this base image that fails the fused_ops
+    # build. 2.5.1 is the last cu121 build and satisfies fireants' torch>=2.3.0.
     python3 -m pip install --no-cache-dir \
-        --extra-index-url https://download.pytorch.org/whl/cu121 \
-        "torch>=2.3.0"
+        --index-url https://download.pytorch.org/whl/cu121 \
+        "torch==2.5.1+cu121"
     python3 -m pip install --no-cache-dir fireants==1.5.0 "SimpleITK>=2.2.1"
 
     # The fused CUDA ops are NOT included by `pip install fireants` and must be
@@ -86,7 +100,11 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     python3 setup.py install
     cd /
     rm -rf /tmp/fireants-src
-    python3 -c "import fireants_fused_ops; print('fused ops OK')"
+    # `import torch` first: the extension links against torch/lib/libc10.so
+    # with no rpath, so a bare import dies with "libc10.so: cannot open shared
+    # object file" even when the build is perfect. FireANTs itself always has
+    # torch loaded before it touches the extension, so this mirrors real use.
+    python3 -c "import torch, fireants_fused_ops; print('fused ops OK')"
 
     # Canonical ANTs binaries, pinned release. The wrapper shells out to
     # antsBrainExtraction.sh (the published extraction method the OASIS-30
