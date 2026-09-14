@@ -190,8 +190,9 @@ ants-nidm bids_dir output_dir participant \
   fallback. `cpu` is an explicit opt-in for debugging and is much slower than
   the ANTs path it replaced.
 - `--fireants-batch-size`: how many atlases to register per batch, for
-  `--method fusion` (default: `0`, meaning all twenty at once). Lower it if
-  GPU memory is tight; results are identical, only peak VRAM changes.
+  `--method fusion` (default: `5`; `0` means all twenty at once, which needs
+  more than 80 GB of GPU memory). Lower it if GPU memory is tight; results are
+  identical, only peak VRAM changes.
 - `--label-interpolation`: `genericlabel` or `nearest` (default:
   `genericlabel`). `genericlabel` uses FireANTs' fused CUDA generic-label
   sampler, which returns argmax labels directly. That kernel exists only on

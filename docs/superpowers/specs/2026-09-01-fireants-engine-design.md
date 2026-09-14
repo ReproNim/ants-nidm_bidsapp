@@ -163,11 +163,19 @@ Follows `scripts/pairwise/oasis.py`, using the authors' structure rather than
 invented settings: `AffineRegistration(scales=[4,2,1],
 iterations=[200,100,50])` to initialise, then `SyNRegistration(scales=[4,2,1],
 iterations=[200,100,50], deformation_type='compositive', optimizer='Adam')`
-with `init_affine` from the affine stage. SyN rather than Greedy, as the
-closer analogue to the `SyNRA` it replaces. Learning rate, `cc_kernel_size`,
-`smooth_grad_sigma` and `smooth_warp_sigma` are exposed as options with the
-oasis.py values as defaults, so tier-3 disagreement can be tuned without code
-changes.
+with `init_affine` from the affine stage. SyN was the original choice, as the
+closer analogue to the `SyNRA` it replaces, but tier-3 tuning (2026-09-08,
+jobs 22310298/22311946/22320466/22321551, `scripts/diag_folding.py`) found
+SyN plateaus at primary-label median Dice 0.81 across ten configurations
+after convergence, while `GreedyRegistration` with FireANTs' own OASIS
+schedule reaches 0.852 with zero folding in about half the time. **Greedy is
+now the default** (`DEFORMABLE = "greedy"` in `src/registration/fireants.py`);
+SyN remains available via the same constant for comparison. Learning rate,
+`cc_kernel_size`, `smooth_grad_sigma` and `smooth_warp_sigma` are exposed as
+options with the oasis.py values as defaults, so tier-3 disagreement can be
+tuned without code changes. See [[fireants-registration-root-causes-sep7]]
+for the full tuning trail and the labels (41, 40, 1021, 2019, 49, 50) that
+still miss the per-label floor.
 
 `target_mask` is carried in the signature because `ants.joint_label_fusion`
 needs it downstream, but it is **not** wired into the similarity loss. An
@@ -343,7 +351,7 @@ Added to `parse_arguments` in `src/run.py` and threaded through
 | Flag | Values | Default | Behaviour |
 |---|---|---|---|
 | `--device` | `cuda`, `cpu` | `cuda` | FireANTs compute device |
-| `--fireants-batch-size` | int | `0` (all) | Atlases per registration batch |
+| `--fireants-batch-size` | int | `5` (was `0` = all; see risks) | Atlases per registration batch |
 | `--label-interpolation` | `genericlabel`, `nearest` | `genericlabel` | Atlas label warping. Without built `fused_ops`, or on CPU, `genericlabel` degrades to a one-hot return that `warp_atlases` argmaxes; a warning is logged |
 
 No `--engine` flag: FireANTs is the only registration backend.
@@ -487,7 +495,7 @@ before declaring failure.
 | Silent orientation flip crossing between ANTs and FireANTs | No in-memory conversion exists to get wrong: every crossing is a NIfTI file, the same mechanism already used for `antsBrainExtraction.sh`. Backed by `assert_geometry_match` on every crossing in production, plus tier-1 tests on the handoff and on the guard itself |
 | Registration converges to a plausible-but-wrong warp; app exits 0 with a well-formed TTL | Jacobian gate, BVOL envelope, per-label Dice against a known-good reference — all three, not one |
 | Template↔subject warp direction inverted, reproducing the 11.5 L brain-volume bug | Behavioural tier-1 direction test; `TemplateWarp` exposes a single direction rather than a list whose orientation depends on caller choice |
-| GPU OOM at full 20-atlas batch on smaller cards | `--fireants-batch-size`; default full batch only because `pi_satra` has 80 GB cards |
+| GPU OOM at full 20-atlas batch | `--fireants-batch-size`. The original default of a full batch assumed 80 GB was enough; tier 2 on 2026-09-07 (job 22185737, A100 80GB, empty at start) hit OOM after SyN at 73 GB in use (61 GB live + 11.7 GB allocator fragmentation), so the default is now 5 (~3.7 GB per atlas at full resolution, fits a 40 GB card) |
 | `Dockerfile` / `Singularity` drift | Version-parity test across both files |
 | `fused_ops` build fails or is skipped | Silent: FireANTs degrades to one-hot rather than raising, changing the return shape and costing 97× memory at 256³. Caught at build time (the container asserts `import fireants_fused_ops` imports) and at runtime (the active path is logged, and `warp_atlases` handles both shapes explicitly) |
 | Label-warping method differs (fused argmax vs nearestNeighbor), confounding tier-3 attribution | `--label-interpolation nearest` reproduces the reference's method exactly, isolating the registration change from the interpolation change without needing an ANTs engine |
