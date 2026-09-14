@@ -19,6 +19,12 @@ set -euo pipefail
 
 SIF="$1"; BIDS="$2"; OUT="$3"; SUB="$4"
 
+# Compute nodes have no system apptainer; only the module provides one. Do not
+# rely on the submitting shell having loaded it -- sbatch exports that
+# environment, which is why this script once worked and then failed with
+# "apptainer: command not found" from a fresh shell.
+module load apptainer/1.5.2
+
 nvidia-smi
 mkdir -p "$OUT"
 
