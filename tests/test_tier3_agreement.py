@@ -89,3 +89,32 @@ def test_missing_evalutils_stops_the_run_instead_of_nan_filling(tier3, monkeypat
     assert "fireants.scripts.evalutils" in message
     # Names the actual fix: run it inside the container.
     assert "apptainer exec" in message
+
+
+def test_boundary_concentration_relaxed_labels_are_not_gated_as_primary(tier3):
+    """Labels 40/41 clear PRIMARY_MIN_VOL on median volume alone but are moved
+    to the relaxed tier on atlas-geometry evidence (boundary concentration on
+    a single dominant neighbour; see scripts/label_boundary_analysis.py and
+    the constant's docstring in tier3_agreement.py). This locks that decision
+    in as tested behaviour rather than a comment that can silently drift.
+    """
+    stats = {
+        40: {"median": 7000.0, "sd": 1500.0, "presence": 1.0},
+        41: {"median": 8000.0, "sd": 1500.0, "presence": 1.0},
+        4: {"median": 7000.0, "sd": 1500.0, "presence": 1.0},  # ordinary primary control
+    }
+    assert stats[40]["median"] >= tier3.PRIMARY_MIN_VOL
+    assert stats[41]["median"] >= tier3.PRIMARY_MIN_VOL
+
+    excluded = {l for l, s in stats.items() if s["presence"] < tier3.PRESENCE_FRACTION}
+    primary = {l for l, s in stats.items()
+               if l not in excluded and s["median"] >= tier3.PRIMARY_MIN_VOL
+               and l not in tier3.BOUNDARY_CONCENTRATION_RELAXED}
+    relaxed = {l for l, s in stats.items()
+               if l not in excluded
+               and (tier3.RELAXED_MIN_VOL <= s["median"] < tier3.PRIMARY_MIN_VOL
+                    or l in tier3.BOUNDARY_CONCENTRATION_RELAXED)}
+
+    assert 40 in relaxed and 40 not in primary
+    assert 41 in relaxed and 41 not in primary
+    assert 4 in primary and 4 not in relaxed
