@@ -645,8 +645,24 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     # construction, so it is the one worth asserting.
     _assert_inbound(subject_geom, fixed, "subject crossing into FireANTs")
     _assert_inbound(template_geom, moving, "template crossing into FireANTs")
-    fixed_batch, moving_batch = BatchedImages([fixed]), BatchedImages([moving])
+    if LOSS_MASKED:
+        fixed_batch = BatchedImages([_with_mask_channel(fixed)])
+        moving_batch = BatchedImages([_with_mask_channel(moving)])
+    else:
+        fixed_batch, moving_batch = BatchedImages([fixed]), BatchedImages([moving])
 
+    # Both sides are skull-stripped brain-only images (the docstring above:
+    # `template` is T_template0_BrainCerebellum, not the whole head), so this
+    # is exactly the shared-zero-background scenario that made warp_atlases's
+    # unmasked affine saturate on 2026-09-07 (diagnostic 22188503) -- and this
+    # function had never received that fix. Confirmed on real data
+    # 2026-09-17: the quick method's dseg (which calls this function, via
+    # apply_warp) placed structures 45-50 voxels from where fusion and the
+    # delivered reference both agree they sit, while quick's own
+    # preprocessing (shared with fusion) matched the reference closely -- so
+    # the defect was specifically here, not upstream. masked_cc + Greedy are
+    # the same two levers that fixed warp_atlases; see
+    # [[fireants-registration-root-causes-sep7]].
     log.info("Template registration (affine)")
     affine = AffineRegistration(
         AFFINE_SCALES,
@@ -657,25 +673,52 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
         optimizer_lr=AFFINE_LR,
         cc_kernel_size=CC_KERNEL_SIZE,
         init_rigid=_moments_init(fixed_batch, moving_batch),
+        **_loss_kwargs(),
     )
     affine.optimize()
 
-    log.info("Template registration (SyN)")
-    syn = SyNRegistration(
-        SYN_SCALES,
-        SYN_ITERATIONS,
-        fixed_batch,
-        moving_batch,
-        deformation_type="compositive",
-        optimizer="Adam",
-        optimizer_lr=SYN_LR,
-        cc_kernel_size=CC_KERNEL_SIZE,
-        smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
-        smooth_warp_sigma=SMOOTH_WARP_SIGMA,
-        init_affine=affine.get_affine_matrix().detach(),
-    )
+    if DEFORMABLE == "greedy":
+        from fireants.registration.greedy import GreedyRegistration
+
+        log.info("Template registration (Greedy)")
+        syn = GreedyRegistration(
+            GREEDY_SCALES,
+            GREEDY_ITERATIONS,
+            fixed_batch,
+            moving_batch,
+            deformation_type="compositive",
+            optimizer="Adam",
+            optimizer_lr=GREEDY_LR,
+            cc_kernel_size=GREEDY_CC_KERNEL_SIZE,
+            smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
+            smooth_warp_sigma=SMOOTH_WARP_SIGMA,
+            init_affine=affine.get_affine_matrix().detach(),
+            **_loss_kwargs(),
+        )
+    elif DEFORMABLE == "syn":
+        log.info("Template registration (SyN)")
+        syn = SyNRegistration(
+            SYN_SCALES,
+            SYN_ITERATIONS,
+            fixed_batch,
+            moving_batch,
+            deformation_type="compositive",
+            optimizer="Adam",
+            optimizer_lr=SYN_LR,
+            cc_kernel_size=CC_KERNEL_SIZE,
+            smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
+            smooth_warp_sigma=SMOOTH_WARP_SIGMA,
+            init_affine=affine.get_affine_matrix().detach(),
+            **_loss_kwargs(),
+        )
+    else:
+        raise ValueError(f"DEFORMABLE must be 'syn' or 'greedy', got {DEFORMABLE!r}")
     syn.optimize()
 
+    # TemplateWarp only ever calls the deformable stage's own registration
+    # methods (get_warp_parameters etc.) on fixed_batch/moving_batch, which
+    # -- when LOSS_MASKED -- carry a trailing mask channel; that channel's
+    # own probability content isn't itself warped anywhere, so this is safe.
     return TemplateWarp(syn, fixed_batch, moving_batch, fixed.itk_image, device)
 
 
