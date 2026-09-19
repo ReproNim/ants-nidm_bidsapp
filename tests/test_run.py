@@ -340,6 +340,182 @@ class TestRun(unittest.TestCase):
             mock_instance.run_subject.assert_called_once()
             mock_nidm.assert_called_once()
 
+    def test_process_participant_segmentation_failure_skips_nidm(self):
+        """run_subject() returning False must not fall through to a NIDM
+        conversion that would report success anyway -- exactly the
+        exit-0-but-wrong shape this repo has been bitten by before (see
+        memory: "a NIDM app can succeed and still be wrong"). Neither
+        test_process_participant (happy path) nor
+        test_processing_summary_records_failure (the summary writer in
+        isolation, not this dispatch) previously covered this branch.
+        """
+        class Args:
+            def __init__(self, test_instance):
+                self.bids_dir = test_instance.bids_dir
+                self.output_dir = test_instance.output_dir
+                self.participant_label = "01"
+                self.session_label = None
+                self.modality = "T1w"
+                self.prob_threshold = 0.5
+                self.method = "fusion"
+                self.skip_nidm = False
+                self.skip_ants = False
+                self.ants_input = None
+                self.num_threads = 1
+                self.verbose = True
+                self.skip_bids_validation = True
+                self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 5
+                self.label_interpolation = "genericlabel"
+
+        args = Args(self)
+
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion') as mock_nidm, \
+             patch('bids.BIDSLayout') as MockBIDSLayout:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']
+            MockBIDSLayout.return_value = mock_layout
+
+            mock_instance = MockSegmenter.return_value
+            mock_instance.run_subject.return_value = False
+            mock_nidm.return_value = True
+
+            result = process_participant(args, self.logger)
+
+            self.assertEqual(result, 1)
+            mock_instance.run_subject.assert_called_once()
+            mock_nidm.assert_not_called()
+
+    def test_process_participant_subject_not_found(self):
+        """A participant label absent from the BIDS layout must fail fast,
+        before touching the segmenter or the filesystem."""
+        class Args:
+            def __init__(self, test_instance):
+                self.bids_dir = test_instance.bids_dir
+                self.output_dir = test_instance.output_dir
+                self.participant_label = "99"
+                self.session_label = None
+                self.modality = "T1w"
+                self.prob_threshold = 0.5
+                self.method = "fusion"
+                self.skip_nidm = False
+                self.skip_ants = False
+                self.ants_input = None
+                self.num_threads = 1
+                self.verbose = True
+                self.skip_bids_validation = True
+                self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 5
+                self.label_interpolation = "genericlabel"
+
+        args = Args(self)
+
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion') as mock_nidm, \
+             patch('bids.BIDSLayout') as MockBIDSLayout:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']  # 99 is not in here
+            MockBIDSLayout.return_value = mock_layout
+            mock_instance = MockSegmenter.return_value
+
+            result = process_participant(args, self.logger)
+
+            self.assertEqual(result, 1)
+            mock_instance.run_subject.assert_not_called()
+            mock_nidm.assert_not_called()
+
+    def test_process_participant_skip_ants_uses_existing_derivatives(self):
+        """--skip-ants must not call run_subject, and with --ants-input set
+        must redirect derivatives_dir there rather than the fresh output_dir
+        (this is the BABS re-run-NIDM-only path)."""
+        class Args:
+            def __init__(self, test_instance, ants_input):
+                self.bids_dir = test_instance.bids_dir
+                self.output_dir = test_instance.output_dir
+                self.participant_label = "01"
+                self.session_label = None
+                self.modality = "T1w"
+                self.prob_threshold = 0.5
+                self.method = "fusion"
+                self.skip_nidm = False
+                self.skip_ants = True
+                self.ants_input = ants_input
+                self.num_threads = 1
+                self.verbose = True
+                self.skip_bids_validation = True
+                self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 5
+                self.label_interpolation = "genericlabel"
+
+        existing_derivatives = os.path.join(self.temp_dir, "existing_derivatives")
+        os.makedirs(existing_derivatives, exist_ok=True)
+        args = Args(self, ants_input=existing_derivatives)
+
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion') as mock_nidm, \
+             patch('bids.BIDSLayout') as MockBIDSLayout:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']
+            mock_layout.get.return_value = []
+            MockBIDSLayout.return_value = mock_layout
+            mock_instance = MockSegmenter.return_value
+            mock_nidm.return_value = True
+
+            result = process_participant(args, self.logger)
+
+            mock_instance.run_subject.assert_not_called()
+            self.assertEqual(result, 0)
+            # nidm_conversion must have been pointed at ants_input, not the
+            # fresh (empty) output_dir -- called with derivatives_dir as a
+            # positional/keyword arg either way, so inspect the call.
+            _, kwargs = mock_nidm.call_args
+            self.assertEqual(str(kwargs.get("derivatives_dir")), existing_derivatives)
+
+    def test_process_participant_skip_nidm_leaves_segmentation_result_alone(self):
+        """--skip-nidm must not call nidm_conversion, and a successful
+        segmentation with NIDM skipped is still reported as success -- the
+        skip is a deliberate no-op, not a failure."""
+        class Args:
+            def __init__(self, test_instance):
+                self.bids_dir = test_instance.bids_dir
+                self.output_dir = test_instance.output_dir
+                self.participant_label = "01"
+                self.session_label = None
+                self.modality = "T1w"
+                self.prob_threshold = 0.5
+                self.method = "fusion"
+                self.skip_nidm = True
+                self.skip_ants = False
+                self.ants_input = None
+                self.num_threads = 1
+                self.verbose = True
+                self.skip_bids_validation = True
+                self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 5
+                self.label_interpolation = "genericlabel"
+
+        args = Args(self)
+
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion') as mock_nidm, \
+             patch('bids.BIDSLayout') as MockBIDSLayout:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']
+            MockBIDSLayout.return_value = mock_layout
+            mock_instance = MockSegmenter.return_value
+            mock_instance.run_subject.return_value = True
+
+            result = process_participant(args, self.logger)
+
+            self.assertEqual(result, 0)
+            mock_instance.run_subject.assert_called_once()
+            mock_nidm.assert_not_called()
+
     @unittest.skipIf(IN_CI, "Skip in CI environment as it requires modifying template directory")
     def test_process_session(self):
         """Test session level processing with NIDM conversion"""
