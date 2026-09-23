@@ -488,6 +488,33 @@ class ANTsSegmentation:
                 )
 
             # Perform joint label fusion
+            #
+            # max_lab_plus_one=True is load-bearing, not a tuning knob. The
+            # brain extraction mask is much larger than the union of the
+            # labelled structures: the atlases leave CSF and everything
+            # between structures at 0. The vote has no background class, so
+            # with max_lab_plus_one=False every one of those masked-but-
+            # unlabelled voxels still has to be assigned a real label, and an
+            # argmax over a probability stack that is ~0 everywhere returns
+            # the first entry -- the lowest label id, which for this atlas
+            # vocabulary is 4, the third ventricle.
+            #
+            # That is not hypothetical. The delivered tier-2 output for
+            # sub-0051456 called 89924 voxels "3rd ventricle" against ~700 in
+            # the atlases, in 2725 disconnected components, 74% of them within
+            # 3 voxels of the mask boundary, and 96% of them at a maximum
+            # across-label probability below 0.05. A minimal reproduction
+            # (scripts/diag_jlf_background_fallback.py) shows the same 54x
+            # inflation and shows this flag removing it exactly.
+            #
+            # no_zeroes=True also empties the band, but it constrains the
+            # solution to voxels non-zero in *every* atlas, which erodes real
+            # structures at their boundaries -- in the reproduction it
+            # undershoots the true structure by a third. max_lab_plus_one
+            # recovers it exactly.
+            #
+            # Side effect documented by ANTsPy: this mutates the label images
+            # passed in. warped_labels is not used again after this call.
             self.logger.info(f"Running joint label fusion with {len(warped_images)} atlases")
             fusion = ants.joint_label_fusion(
                 target_image=masked_brain,
@@ -501,7 +528,7 @@ class ANTsSegmentation:
                 r_search=3,
                 nonnegative=False,
                 no_zeroes=False,
-                max_lab_plus_one=False,
+                max_lab_plus_one=True,
                 verbose=True
             )
             

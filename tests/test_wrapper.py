@@ -503,6 +503,43 @@ class TestANTsSegmentation(unittest.TestCase):
         self.assertIs(mock_jlf.call_args.kwargs["atlas_list"], warped_imgs)
         self.assertIs(mock_jlf.call_args.kwargs["label_list"], warped_labs)
 
+    def test_fusion_asks_for_an_explicit_background_class(self):
+        """ants.joint_label_fusion has no background class of its own. The
+        brain mask is far larger than the union of the labelled structures, so
+        without max_lab_plus_one every masked-but-unlabelled voxel is forced
+        onto a real label, and an argmax over near-zero probabilities picks the
+        lowest id -- 4, the third ventricle. The delivered tier-2 output for
+        sub-0051456 called 89924 voxels third ventricle against ~700 in the
+        atlases. See scripts/diag_jlf_background_fallback.py.
+        """
+        from unittest.mock import patch
+
+        with patch("src.antspy.wrapper.warp_atlases") as mock_warp, \
+             patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct, \
+             patch("src.antspy.wrapper.ants.joint_label_fusion") as mock_jlf:
+            mock_warp.return_value = ([], [])
+            mock_ct.return_value = {
+                "BrainSegmentationN4": mock_image_read(),
+                "BrainExtractionMask": mock_image_read(),
+                "TemplateWarp": object(),
+            }
+            mock_jlf.return_value = {
+                "segmentation": mock_image_read(),
+                "intensity": mock_image_read(),
+                "probabilityimages": [],
+                "segmentation_numbers": [1],
+            }
+            self.segmenter.segment_image(mock_image_read(), method="fusion")
+
+        kwargs = mock_jlf.call_args.kwargs
+        self.assertTrue(
+            kwargs["max_lab_plus_one"],
+            "max_lab_plus_one must stay True or unlabelled mask interior lands on label 4",
+        )
+        # no_zeroes would also empty the band, but by constraining the solution
+        # to voxels non-zero in every atlas, which erodes real structures.
+        self.assertFalse(kwargs["no_zeroes"])
+
     def test_fusion_passes_engine_options_through(self):
         from unittest.mock import patch
 
