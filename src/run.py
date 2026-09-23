@@ -325,8 +325,23 @@ def initialize(args):
 
     return layout, segmenter, derivatives_dir, nidm_input_dir
 
+#: Which label protocol each --method's segmentation is numbered in.
+#:
+#: These are not interchangeable and the difference is invisible downstream.
+#: ``fusion`` votes over the OASIS-TRT-20 DKT31_CMA atlases, whose subcortical
+#: ids follow the Neuromorphometrics/BrainCOLOR protocol; ``quick`` warps a
+#: template map numbered in FreeSurfer aseg ids. Both occupy the same numeric
+#: range, so naming one with the other's table yields a valid NIDM file full of
+#: wrong structures -- see src/antspy/label_vocabulary.py.
+LABEL_PROTOCOL_BY_METHOD = {
+    "fusion": "neuromorphometrics",
+    "quick": "freesurfer",
+}
+
+
 def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
-                    bids_session=None, verbose=False, input_file=None):
+                    bids_session=None, verbose=False, input_file=None,
+                    method=None):
     """Convert ANTs segmentation outputs to NIDM format.
 
     Writes ``nidm.ttl`` (and the shared ``ants_cde.ttl`` vocabulary, which
@@ -343,6 +358,10 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
         bids_session (str): Session label (without "ses-" prefix)
         verbose (bool): Enable verbose output
         input_file (str or Path): Path to the input T1w file
+        method (str or None): Segmentation method that produced the stats, used
+            to pick the label protocol the converter names structures with. An
+            unrecognised or absent method falls back to FreeSurfer, which is
+            what every caller got before the protocol existed.
     Returns:
         bool: True if conversion succeeded, False otherwise
     """
@@ -399,6 +418,17 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
             "-subjid", f"sub-{bids_subject}",
             "-o", nidm_output_str
         ]
+
+        label_protocol = LABEL_PROTOCOL_BY_METHOD.get(method)
+        if label_protocol is None:
+            if method is not None:
+                logger.warning(
+                    f"No label protocol registered for method {method!r}; naming "
+                    "structures with the FreeSurfer table. If this method does not "
+                    "emit FreeSurfer aseg ids the structure names will be wrong."
+                )
+        else:
+            cmd.extend(["--label-protocol", label_protocol])
 
         # Add existing NIDM file if available
         if existing_nidm_file:
@@ -497,6 +527,7 @@ def process_participant(args, logger):
             bids_session=bids_session,
             verbose=args.verbose,
             input_file=input_file,
+            method=args.method,
         )
     
     save_processing_summary(
@@ -595,6 +626,7 @@ def process_session(args, logger):
             bids_session=bids_session,
             verbose=args.verbose,
             input_file=input_file,
+            method=args.method,
         )
     
     save_processing_summary(

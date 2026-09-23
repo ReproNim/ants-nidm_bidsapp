@@ -66,6 +66,8 @@ import numpy as np
 NEUROMORPHOMETRICS_TO_ASEG: dict[int, int] = {
     4: 14,    # 3rd Ventricle
     11: 15,   # 4th Ventricle
+    15: 72,   # 5th Ventricle (cavum; present in only 4 of the 20 atlases,
+              #                5-18 voxels, midline -- never wins a 20-atlas vote)
     23: 58,   # Right Accumbens area
     30: 26,   # Left Accumbens area
     31: 54,   # Right Amygdala
@@ -110,6 +112,7 @@ NEUROMORPHOMETRICS_TO_ASEG: dict[int, int] = {
 EVIDENCE: dict[int, tuple[str, float | None]] = {
     4: ("centroid", None),
     11: ("centroid", None),
+    15: ("protocol", None),
     23: ("overlap", 0.42),
     30: ("overlap", 0.28),
     31: ("overlap", 0.37),

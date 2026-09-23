@@ -209,6 +209,82 @@ class TestRun(unittest.TestCase):
             for path in paths:
                 self.assertTrue(os.path.exists(path))
 
+    def _run_conversion_capturing_cmd(self, method):
+        """Run nidm_conversion with subprocess mocked and return the argv it built."""
+        derivatives_dir = self.create_derivatives_structure()
+        subject_dir = os.path.join(derivatives_dir, "sub-01", "ses-01")
+        with patch('subprocess.run') as mock_run:
+            mock_process = MagicMock()
+            mock_process.returncode = 0
+            mock_process.stdout = "Success"
+            mock_process.stderr = ""
+
+            def write_nidm(*a, **kw):
+                with open(os.path.join(subject_dir, "nidm.ttl"), "w") as f:
+                    f.write("@prefix nidm: <http://purl.org/nidash/nidm#> .\n")
+                return mock_process
+            mock_run.side_effect = write_nidm
+
+            result = nidm_conversion(
+                self.logger, derivatives_dir, "01",
+                bids_session="01", verbose=False, method=method,
+            )
+        self.assertTrue(result)
+        mock_run.assert_called_once()
+        return mock_run.call_args[0][0]
+
+    def test_fusion_is_named_with_the_neuromorphometrics_protocol(self):
+        """fusion votes over the OASIS-TRT-20 DKT31_CMA atlases, whose
+        subcortical ids are Neuromorphometrics/BrainCOLOR. Naming them with the
+        FreeSurfer table is what put Left-Porg and Right-undetermined in
+        delivered NIDM, and reported the right thalamus as
+        Right-Substancia-Nigra."""
+        cmd = self._run_conversion_capturing_cmd("fusion")
+        self.assertIn("--label-protocol", cmd)
+        self.assertEqual(cmd[cmd.index("--label-protocol") + 1], "neuromorphometrics")
+
+    def test_quick_is_named_with_the_freesurfer_protocol(self):
+        """quick warps a template map already numbered in FreeSurfer aseg ids."""
+        cmd = self._run_conversion_capturing_cmd("quick")
+        self.assertIn("--label-protocol", cmd)
+        self.assertEqual(cmd[cmd.index("--label-protocol") + 1], "freesurfer")
+
+    def test_unknown_method_falls_back_without_the_flag(self):
+        """An unregistered method must not silently claim a protocol; it gets
+        the converter's own FreeSurfer default and a warning."""
+        cmd = self._run_conversion_capturing_cmd("some-future-method")
+        self.assertNotIn("--label-protocol", cmd)
+
+    def test_every_cli_method_has_a_protocol(self):
+        """A new --method choice that nobody maps here would be named with the
+        wrong table by default, silently."""
+        from src.run import LABEL_PROTOCOL_BY_METHOD, parse_arguments
+        import argparse as _argparse
+
+        # Read the --method choices off the real parser rather than restating
+        # them, so adding a method without registering its protocol fails here.
+        holder = {}
+        real_add = _argparse.ArgumentParser.add_argument
+
+        def capture(parser_self, *a, **kw):
+            if "--method" in a and "choices" in kw:
+                holder["choices"] = set(kw["choices"])
+            return real_add(parser_self, *a, **kw)
+
+        argv = sys.argv
+        sys.argv = ["ants-nidm", "bids", "out", "participant"]
+        try:
+            with patch.object(_argparse.ArgumentParser, "add_argument", capture):
+                try:
+                    parse_arguments()
+                except SystemExit:
+                    pass
+        finally:
+            sys.argv = argv
+
+        self.assertTrue(holder.get("choices"), "could not read --method choices")
+        self.assertEqual(set(LABEL_PROTOCOL_BY_METHOD), holder["choices"])
+
     def test_nidm_conversion_missing_files(self):
         """Test NIDM conversion with missing required files"""
         derivatives_dir = self.output_dir
