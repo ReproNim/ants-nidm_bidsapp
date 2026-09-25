@@ -40,7 +40,10 @@ each entry and ``docs/superpowers/specs/analysis/`` for the recorded run.
 
 Provenance
 ----------
-Every entry was derived from data, not from a published protocol table:
+Every entry was derived from data, not from a published protocol table.
+The map holds 37 subcortical entries: 27 ``overlap``, 6 ``centroid``,
+4 ``protocol``. ``tests/test_label_vocabulary.py`` pins that breakdown so
+the counts quoted elsewhere cannot silently drift from the table.
 
 * ``overlap`` -- confirmed by reciprocal maximum spatial overlap between the
   ``fusion`` and ``quick`` dsegs of the *same* subject in the *same* space

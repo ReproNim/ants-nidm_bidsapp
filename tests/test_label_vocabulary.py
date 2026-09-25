@@ -167,3 +167,23 @@ def test_antspy_package_still_exports_the_segmentation_class():
     proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     assert "ok" in proc.stdout
+
+
+def test_evidence_breakdown_is_pinned():
+    """The entry counts are quoted in the module docstring and in CLAUDE.md.
+    A drafting pass once quoted 36/26/4 when the table held 36/27/3, so pin the
+    real breakdown here rather than trusting prose to stay in step."""
+    from collections import Counter
+
+    kinds = Counter(kind for kind, _ in EVIDENCE.values())
+    assert len(NEUROMORPHOMETRICS_TO_ASEG) == 37
+    assert kinds == {"overlap": 27, "centroid": 6, "protocol": 4}
+
+
+def test_docstring_quotes_the_real_counts():
+    """If someone changes the table, the docstring must change with it."""
+    import src.antspy.label_vocabulary as mod
+
+    doc = mod.__doc__
+    assert "37 subcortical entries" in doc
+    assert "27 ``overlap``" in doc and "6 ``centroid``" in doc and "4 ``protocol``" in doc
