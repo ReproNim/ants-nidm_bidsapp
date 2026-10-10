@@ -489,7 +489,7 @@ class ANTsSegmentation:
 
             # Perform joint label fusion
             #
-            # max_lab_plus_one=True is load-bearing, not a tuning knob. The
+            # max_lab_plus_one=True is required, not a tuning knob. The
             # brain extraction mask is much larger than the union of the
             # labelled structures: the atlases leave CSF and everything
             # between structures at 0. The vote has no background class, so
@@ -513,6 +513,21 @@ class ANTsSegmentation:
             # undershoots the true structure by a third. max_lab_plus_one
             # recovers it exactly.
             #
+            # usecor=True is also not a tuning knob. The target (N4-corrected
+            # masked brain, in-mask median ~388) and the OASIS-TRT-20 atlas
+            # brains (~1100) are on different intensity scales, and the
+            # default mean-squared-difference similarity is not
+            # scale-invariant: the r_search patch search moves each atlas's
+            # labels toward wherever raw intensity matches. Subject WM then
+            # matches darker atlas tissue, so WM-like structures shrink and
+            # GM/CSF grow -- on 6 Caltech subjects vs FreeSurfer, brain stem
+            # 0.38x, cerebellar WM 0.20-0.21x, lateral ventricles 3.2x, mean
+            # Dice 0.36-0.40. Correlation is scale-invariant; with it the same
+            # subjects reach 0.69-0.76, with higher Dice than r_search=0 or
+            # rescaling the target in every structure group and on every
+            # subject (scripts/diag_jlf_validation_summary.py). The bias predates
+            # FireANTs: the ANTs-registered August outputs carry it too.
+            #
             # Side effect documented by ANTsPy: this mutates the label images
             # passed in. warped_labels is not used again after this call.
             self.logger.info(f"Running joint label fusion with {len(warped_images)} atlases")
@@ -524,7 +539,7 @@ class ANTsSegmentation:
                 beta=4.0,
                 rad=2,
                 rho=0.01,
-                usecor=False,
+                usecor=True,
                 r_search=3,
                 nonnegative=False,
                 no_zeroes=False,

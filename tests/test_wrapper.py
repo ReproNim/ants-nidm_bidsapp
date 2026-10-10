@@ -540,6 +540,43 @@ class TestANTsSegmentation(unittest.TestCase):
         # to voxels non-zero in every atlas, which erodes real structures.
         self.assertFalse(kwargs["no_zeroes"])
 
+    def test_fusion_uses_scale_invariant_patch_similarity(self):
+        """The N4 target (in-mask median ~388) and the atlas brains (~1100)
+        are on different intensity scales. With mean squared difference the
+        patch search moves each atlas's labels toward tissue of matching raw
+        intensity, so WM-like structures shrink (brain stem 0.38x FreeSurfer,
+        cerebellar WM 0.20-0.21x) and GM/CSF grow (lateral ventricles 3.2x).
+        Correlation is scale-invariant. On 6 Caltech subjects usecor=True
+        raised mean Dice with FreeSurfer from 0.36-0.40 to 0.69-0.76, above
+        r_search=0 and target rescaling on every subject.
+        See scripts/diag_jlf_validation_summary.py.
+        """
+        from unittest.mock import patch
+
+        with patch("src.antspy.wrapper.warp_atlases") as mock_warp, \
+             patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct, \
+             patch("src.antspy.wrapper.ants.joint_label_fusion") as mock_jlf:
+            mock_warp.return_value = ([], [])
+            mock_ct.return_value = {
+                "BrainSegmentationN4": mock_image_read(),
+                "BrainExtractionMask": mock_image_read(),
+                "TemplateWarp": object(),
+            }
+            mock_jlf.return_value = {
+                "segmentation": mock_image_read(),
+                "intensity": mock_image_read(),
+                "probabilityimages": [],
+                "segmentation_numbers": [1],
+            }
+            self.segmenter.segment_image(mock_image_read(), method="fusion")
+
+        kwargs = mock_jlf.call_args.kwargs
+        self.assertTrue(kwargs["usecor"],
+                        "mean squared difference across mismatched intensity scales mis-sizes labels by tissue")
+        # The search is kept: with correlation it helps (ventricles, caudate)
+        # instead of relocating labels by raw intensity.
+        self.assertEqual(kwargs["r_search"], 3)
+
     def test_fusion_passes_engine_options_through(self):
         from unittest.mock import patch
 
