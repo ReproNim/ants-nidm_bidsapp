@@ -7,6 +7,13 @@
 #
 # Usage:
 #   sbatch scripts/tier2_smoke.sbatch <sif> <bids_dir> <out_dir> <participant>
+#
+# With SRC_FROM_REPO=1 in the environment, a copy of the repo's src/
+# (including the ants_seg_to_nidm submodule) taken when the job starts is bound
+# over the container's /opt/src, so a code change can be checked end to end
+# without rebuilding the SIF. It is a copy, not the live tree: the NIDM
+# conversion and the second method start long after the first, and edits made
+# in between would otherwise run a mix of old and new code.
 #SBATCH --job-name=ants-fireants-tier2
 #SBATCH --partition=pi_satra
 #SBATCH --gres=gpu:1
@@ -28,6 +35,16 @@ module load apptainer/1.5.2
 nvidia-smi
 mkdir -p "$OUT"
 
+SRC_BIND=()
+if [[ "${SRC_FROM_REPO:-0}" == "1" ]]; then
+    git rev-parse HEAD
+    git status --short src/
+    SRC_SNAPSHOT="$(mktemp -d "${TMPDIR:-/tmp}/tier2-src-XXXXXX")"
+    cp -a src/. "$SRC_SNAPSHOT/"
+    trap 'rm -rf "$SRC_SNAPSHOT"' EXIT
+    SRC_BIND=(--bind "${SRC_SNAPSHOT}:/opt/src:ro")
+fi
+
 for METHOD in fusion quick; do
     echo "=== method=${METHOD} ==="
     WORK="$(mktemp -d "${TMPDIR:-/tmp}/tier2-${METHOD}-XXXXXX")"
@@ -42,6 +59,7 @@ for METHOD in fusion quick; do
     # to producing a fresh NIDM graph when no input NIDM is found, so no extra
     # bind is needed -- pass --nidm-input-dir if you want to augment one.
     apptainer run --nv \
+        "${SRC_BIND[@]}" \
         --bind "${BIDS}:/bids:ro" \
         --bind "${OUT}/${METHOD}:/out" \
         --bind "${WORK}:/work" \
