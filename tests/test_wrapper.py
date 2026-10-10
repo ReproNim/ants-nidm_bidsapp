@@ -144,10 +144,16 @@ class TestANTsSegmentation(unittest.TestCase):
 
         # 'fusion' returns one posterior per anatomical label, plus the label
         # numbers those posteriors belong to.
+        # The brain extraction mask covers all 6 voxels; only 5 carry a label.
+        mock_mask = MagicMock()
+        mock_mask.numpy.return_value = np.ones(6)
+        mock_mask.spacing = [1.0, 1.0, 1.0]
+
         segmentation_results = {
             'segmentation': mock_seg,
             'probabilityimages': [mock_prob1, mock_prob2, mock_prob3],
             'segmentation_numbers': [1, 2, 24],
+            'BrainExtractionMask': mock_mask,
         }
 
         with patch('src.antspy.wrapper.ants.image_write') as mock_write:
@@ -179,19 +185,28 @@ class TestANTsSegmentation(unittest.TestCase):
                 self.assertEqual(volumes["1"], 2)
                 self.assertEqual(volumes["2"], 3)
 
-            # Verify brainvols.csv content. BVOL only: CSFVOL/GMVOL/WMVOL used to
+            # Verify brainvols.csv content. No CSFVOL/GMVOL/WMVOL: they used to
             # be derived from probabilityimages[0..2] as if they were CSF/GM/WM
             # tissue posteriors, but under 'fusion' those are per-label
             # posteriors and under 'quick' they do not exist -- so the columns
             # were wrong in every path that produced them.
+            #
+            # BVOL is the brain extraction mask volume, as in ANTs'
+            # antsCorticalThickness.sh. LABELVOL is the sum of the labels, which
+            # BVOL used to be: the label set has no cerebral white matter, so
+            # that sum is about half a brain.
             with open(brainvols_file, newline='') as f:
                 reader = csv.DictReader(f)
                 fieldnames = set(reader.fieldnames or [])
-                self.assertEqual(fieldnames, {"BVOL"})
+                self.assertEqual(fieldnames, {"BVOL", "LABELVOL"})
                 self.assertFalse(fieldnames & {"CSFVOL", "GMVOL", "WMVOL"},
                                  "tissue volumes must not be faked from label posteriors")
                 rows = list(reader)
                 self.assertEqual(len(rows), 1)
+                self.assertEqual(float(rows[0]["BVOL"]), 6.0)
+                self.assertEqual(float(rows[0]["LABELVOL"]), 5.0)
+            self.assertEqual(result['brain_volume'], 6.0)
+            self.assertEqual(result['label_volume_sum'], 5.0)
 
             # Check that image_write was called for all images
             self.assertEqual(mock_write.call_count, 4)  # 1 segmentation + 3 probability maps
@@ -376,7 +391,8 @@ class TestANTsSegmentation(unittest.TestCase):
 
         segmentation_results = {
             'segmentation': mock_seg,
-            'probabilityimages': []
+            'probabilityimages': [],
+            'BrainExtractionMask': mock_seg,
         }
 
         with patch('src.antspy.wrapper.ants.image_write') as mock_write:
@@ -410,6 +426,20 @@ class TestANTsSegmentation(unittest.TestCase):
                 reader = csv.DictReader(f)
                 self.assertIn("BVOL", reader.fieldnames)
 
+    def test_organize_bids_output_requires_the_brain_mask(self):
+        """BVOL comes from the brain extraction mask. Without it the only
+        volume left is the label sum, which is about half a brain; writing
+        that, or dropping BVOL silently, would both pass downstream unnoticed."""
+        mock_seg = MagicMock()
+        mock_seg.numpy.return_value = np.array([0, 1, 2])
+        mock_seg.spacing = [1.0, 1.0, 1.0]
+
+        with patch('src.antspy.wrapper.ants.image_write'):
+            with self.assertRaises(ValueError) as ctx:
+                self.segmenter._organize_bids_output(
+                    {'segmentation': mock_seg, 'probabilityimages': []}, "01")
+        self.assertIn("BrainExtractionMask", str(ctx.exception))
+
     def test_save_results(self):
         """Test save_results method with output directory handling"""
         # Create mock segmentation
@@ -419,7 +449,8 @@ class TestANTsSegmentation(unittest.TestCase):
 
         segmentation_results = {
             'segmentation': mock_seg,
-            'probabilityimages': []
+            'probabilityimages': [],
+            'BrainExtractionMask': mock_seg,
         }
 
         # Test with default output directory

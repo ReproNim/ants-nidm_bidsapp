@@ -621,7 +621,24 @@ class ANTsSegmentation:
         if filtered_ref_lines:
             self.logger.info(f"Filtered FreeSurfer reference line labels from stats output: {filtered_ref_lines}")
 
-        brain_volume = float(label_volumes_mm3.sum()) if label_volumes_mm3.size else 0.0
+        label_volume_sum = float(label_volumes_mm3.sum()) if label_volumes_mm3.size else 0.0
+
+        # BVOL is the brain extraction mask volume, as in ANTs'
+        # antsCorticalThickness.sh, and its data element says it is about the
+        # brain (UBERON_0000955). It used to be the label sum above, which is
+        # not a brain volume: the DKT31_CMA label set has no cerebral white
+        # matter label, so the sum is about half a brain (0.90-1.03 L against
+        # a mask of 1.68-1.87 L on 6 Caltech subjects). The mask agrees with
+        # FreeSurfer's BrainSegVol within 0.8-4.2% on the same subjects. It
+        # includes the ventricles and some sulcal CSF, so it is not a
+        # parenchymal volume. The label sum is still reported, as LABELVOL.
+        mask_image = segmentation.get('BrainExtractionMask')
+        if mask_image is None:
+            raise ValueError(
+                "segmentation has no BrainExtractionMask; BVOL is the brain mask "
+                "volume and cannot be computed without it"
+            )
+        brain_volume = float(np.count_nonzero(mask_image.numpy())) * float(np.prod(mask_image.spacing))
 
         # Generate antslabelstats.csv with subject prefix
         seg_base = f"sub-{bids_subject}{session_part}"
@@ -635,7 +652,8 @@ class ANTsSegmentation:
 
         # Generate antsbrainvols.csv
         #
-        # Only BVOL is reported. This used to also emit CSFVOL/GMVOL/WMVOL from
+        # BVOL (brain mask) and LABELVOL (label sum), and no tissue volumes.
+        # This used to also emit CSFVOL/GMVOL/WMVOL from
         # probabilityimages[0], [1] and [2], on the assumption that those are
         # CSF/GM/WM tissue posteriors. They are not, in either method:
         #   - 'fusion' returns one posterior per *anatomical label* (103 of them
@@ -648,7 +666,7 @@ class ANTsSegmentation:
         # Deriving real tissue volumes means grouping DKT labels into tissue
         # classes (or running Atropos for posteriors), which is a separate piece
         # of work; reporting nothing beats reporting numbers off by ~100x.
-        brain_vol_data = {"BVOL": brain_volume}
+        brain_vol_data = {"BVOL": brain_volume, "LABELVOL": label_volume_sum}
 
         brainvols_file = stats_dir / f"{seg_base}_antsbrainvols.csv"
         pd.DataFrame([brain_vol_data]).to_csv(brainvols_file, index=False)
@@ -678,6 +696,7 @@ class ANTsSegmentation:
         self.logger.info(f"Saved segmentation results for subject {bids_subject}")
         volume_info = {
             'brain_volume': brain_volume,
+            'label_volume_sum': label_volume_sum,
             'label_stats': str(labelstats_file),
             'brain_vols': str(brainvols_file),
             'segmentation': str(label_path),
@@ -799,7 +818,9 @@ class ANTsSegmentation:
             if volumes:
                 self.logger.info("Segmentation volumes:")
                 if 'brain_volume' in volumes:
-                    self.logger.info(f"  BVOL: {volumes['brain_volume']:.2f} mm³")
+                    self.logger.info(f"  BVOL (brain mask): {volumes['brain_volume']:.2f} mm³")
+                if 'label_volume_sum' in volumes:
+                    self.logger.info(f"  LABELVOL (sum of labels): {volumes['label_volume_sum']:.2f} mm³")
                 if 'label_volumes' in volumes:
                     for label, volume in volumes['label_volumes'].items():
                         self.logger.info(f"  Label {label}: {volume:.2f} mm³")
