@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-The existing pilot gate (see the project memory's `reference_ants_pilot_gate.py`)
+The earlier pilot gate, a separate script run on delivered BABS zips,
 checks volumes against the field of view: background must be at least 25% of
 the FOV, no single label may exceed 25% of it. Those catch a segmentation that
 has escaped the brain mask entirely, which is the failure the August 2026 pilot

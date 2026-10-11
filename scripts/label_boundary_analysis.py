@@ -37,7 +37,7 @@ OASIS-TRT-20 DKT31+CMA atlas label volumes:
 
 Both metrics are computed from atlas anatomy only and are independent of any
 registration algorithm's output, so they cannot have been tuned to fit the
-2026-09-14 tier-3 result -- see [[fireants-registration-root-causes-sep7]].
+2026-09-14 tier-3 result.
 
 Usage:
   scripts/label_boundary_analysis.py --atlas-dir /opt/data/OASIS-TRT-20_DKT31_CMA_labels_v2 \

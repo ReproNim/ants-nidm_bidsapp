@@ -66,8 +66,8 @@ SMOOTH_WARP_SIGMA = 1.0
 # Greedy variants (kernel 5/9, lr 0.25/1.0, warp/grad sigma, 400 iterations,
 # nearest labels) did not improve on the baseline Greedy config below -- it
 # had also converged. Four primary labels (41, 40, 1021, 2019) and two
-# relaxed labels (49, 50) still miss the per-label floor on that one subject;
-# see [[fireants-registration-root-causes-sep7]]. Same API on both classes
+# relaxed labels (49, 50) still miss the per-label floor on that one subject.
+# Same API on both classes
 # (optimize / evaluate / get_warp_parameters / .affine), so the folding gate
 # and label warps are unchanged either way. GREEDY_* mirror FireANTs'
 # scripts/pairwise/oasis.py schedule and GreedyRegistration defaults.
@@ -664,8 +664,7 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     # delivered reference both agree they sit, while quick's own
     # preprocessing (shared with fusion) matched the reference closely -- so
     # the defect was specifically here, not upstream. masked_cc + Greedy are
-    # the same two levers that fixed warp_atlases; see
-    # [[fireants-registration-root-causes-sep7]].
+    # the same two levers that fixed warp_atlases.
     log.info("Template registration (affine)")
     affine = AffineRegistration(
         AFFINE_SCALES,
