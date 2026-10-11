@@ -17,6 +17,20 @@ from natsort import natsorted
 from src.registration import apply_warp, build_label_map, register_to_template, warp_atlases
 from src.registration.device import resolve_device
 
+#: joint_label_fusion settings for --method fusion. Why max_lab_plus_one and
+#: usecor are what they are is explained at the call in segment_image. Kept
+#: here so validation harnesses fuse with exactly the production settings.
+JLF_PARAMS = dict(
+    beta=4.0,
+    rad=2,
+    rho=0.01,
+    usecor=True,
+    r_search=3,
+    nonnegative=False,
+    no_zeroes=False,
+    max_lab_plus_one=True,
+)
+
 class ANTsSegmentation:
     """
     Wrapper class for ANTs segmentation functionality using ANTsPy.
@@ -536,15 +550,8 @@ class ANTsSegmentation:
                 target_image_mask=thickness_results['BrainExtractionMask'],
                 atlas_list=warped_images,
                 label_list=warped_labels,
-                beta=4.0,
-                rad=2,
-                rho=0.01,
-                usecor=True,
-                r_search=3,
-                nonnegative=False,
-                no_zeroes=False,
-                max_lab_plus_one=True,
-                verbose=True
+                verbose=True,
+                **JLF_PARAMS,
             )
             
             return {
