@@ -478,6 +478,7 @@ def warp_atlases(
             moved_labels = fireants_interpolator(
                 label_batch(), **coords, mode="nearest", align_corners=True
             )
+            del coords
         else:
             raise ValueError(
                 f"unknown label_interpolation {label_interpolation!r}; "
@@ -510,7 +511,11 @@ def warp_atlases(
             )
             index += 1
 
-        del affine, syn, moved, moved_labels, moving_batch
+        # Everything that holds this chunk's device tensors, so empty_cache can
+        # release it before the next chunk loads. label_batch is the big one:
+        # on the one-hot path it is ~105 channels per atlas.
+        del affine, syn, moved, moved_labels, moving_batch, label_batch
+        del moments_moving_batch, moving_images
         if device == "cuda":
             torch.cuda.empty_cache()
 
