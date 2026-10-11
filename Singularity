@@ -106,6 +106,11 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     # torch loaded before it touches the extension, so this mirrors real use.
     python3 -c "import torch, fireants_fused_ops; print('fused ops OK')"
 
+    # Retry the downloads below. OSF answers with an occasional 5xx, and one
+    # failed request otherwise fails the whole build (wget exit 8).
+    printf '%s\n' 'tries = 5' 'waitretry = 30' 'retry_connrefused = on' \
+        'retry_on_http_error = 429,500,502,503,504' >> /etc/wgetrc
+
     # Canonical ANTs binaries, pinned release. The wrapper shells out to
     # antsBrainExtraction.sh (the published extraction method the OASIS-30
     # template kit was built for); ANTsPy does not ship the CLI tools or the

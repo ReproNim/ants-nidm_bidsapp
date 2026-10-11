@@ -71,6 +71,11 @@ RUN git clone --depth 1 --branch v1.5.0 https://github.com/rohitrango/FireANTs.g
     cd / && rm -rf /tmp/fireants-src && \
     python3 -c "import torch, fireants_fused_ops; print('fused ops OK')"
 
+# Retry the downloads below. OSF answers with an occasional 5xx, and one
+# failed request otherwise fails the whole build (wget exit 8).
+RUN printf '%s\n' 'tries = 5' 'waitretry = 30' 'retry_connrefused = on' \
+        'retry_on_http_error = 429,500,502,503,504' >> /etc/wgetrc
+
 # Canonical ANTs binaries, pinned release. The wrapper shells out to
 # antsBrainExtraction.sh (the published extraction method the OASIS-30
 # template kit was built for); ANTsPy does not ship the CLI tools or the
