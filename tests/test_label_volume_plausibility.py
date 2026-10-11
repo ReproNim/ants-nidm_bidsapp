@@ -83,6 +83,34 @@ def test_protocol_translation_changes_the_verdict(ranges):
     assert right == []
 
 
+def test_a_structure_missing_entirely_is_flagged(ranges):
+    """A structure every atlas has but the output lacks is the worst case of
+    undersize. The stats file has no row for it, so a check that only reads
+    the rows passed it while flagging a 1-voxel remnant. The fusion stats
+    filter once dropped Right Accumbens (23) this way."""
+    table, n = ranges
+    always = [int(k) for k, v in table.items() if v["n_atlases"] == n]
+    volumes = {int(k): (v["min"] + v["max"]) / 2 for k, v in table.items()}
+    del volumes[always[0]]
+    findings = gate.check_one(volumes, table, n, judge_missing=True)
+    assert [(f["label"], f["kind"]) for f in findings] == [(always[0], "missing")]
+    assert gate.check_one(volumes, table, n) == [], "partial dicts stay unjudged by default"
+
+
+def test_a_missing_structure_is_named_in_the_output_protocol(ranges):
+    """quick output is in aseg ids, so a missing structure is reported by its
+    aseg id, the one a reader would look for in that stats file."""
+    table, n = ranges
+    always = [int(k) for k, v in table.items()
+              if v["n_atlases"] == n and int(k) in gate.NEUROMORPHOMETRICS_TO_ASEG]
+    nm = always[0]
+    volumes = {gate.NEUROMORPHOMETRICS_TO_ASEG.get(int(k), int(k)): (v["min"] + v["max"]) / 2
+               for k, v in table.items() if int(k) != nm}
+    findings = gate.check_one(volumes, table, n, protocol="freesurfer", judge_missing=True)
+    assert [(f["label"], f["atlas_label"], f["kind"]) for f in findings] == \
+        [(gate.NEUROMORPHOMETRICS_TO_ASEG[nm], nm, "missing")]
+
+
 def test_unknown_labels_are_ignored_not_guessed(ranges):
     """An id with no atlas evidence is outside this check's competence. It
     must not be flagged, and must not borrow another label's range."""

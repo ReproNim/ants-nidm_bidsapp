@@ -58,7 +58,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.antspy.label_vocabulary import ASEG_TO_NEUROMORPHOMETRICS  # noqa: E402
+from src.antspy.label_vocabulary import (  # noqa: E402
+    ASEG_TO_NEUROMORPHOMETRICS, NEUROMORPHOMETRICS_TO_ASEG)
 
 RANGES_FILE = Path(__file__).resolve().parent.parent / "src" / "antspy" / "atlas_label_volume_ranges.json"
 
@@ -87,8 +88,13 @@ def read_label_stats(csv_path: Path) -> dict[int, float]:
 def check_one(volumes: dict[int, float], ranges: dict[int, dict], n_atlases: int,
               protocol: str = "neuromorphometrics",
               oversize: float = OVERSIZE_FACTOR,
-              undersize: float = UNDERSIZE_FACTOR) -> list[dict]:
+              undersize: float = UNDERSIZE_FACTOR,
+              judge_missing: bool = False) -> list[dict]:
     """Return one finding per implausible label. Empty list means plausible.
+
+    With ``judge_missing``, ``volumes`` is taken to be the whole stats file,
+    and a structure present in every atlas but absent from it is reported as
+    ``missing``: the worst case of undersize, which has no row to read.
 
     ``protocol`` says which numbering ``volumes`` uses. A ``quick`` output is
     FreeSurfer aseg and is translated into the atlas vocabulary first, because
@@ -116,6 +122,17 @@ def check_one(volumes: dict[int, float], ranges: dict[int, dict], n_atlases: int
                 "atlas_min": ref["min"], "atlas_max": ref["max"],
                 "kind": "undersize", "factor": vol / max(ref["min"], 1),
             })
+    if judge_missing:
+        seen = {ASEG_TO_NEUROMORPHOMETRICS.get(L, L) if protocol == "freesurfer" else L
+                for L in volumes}
+        for key, ref in sorted(ranges.items()):
+            if ref["n_atlases"] == n_atlases and key not in seen:
+                label = NEUROMORPHOMETRICS_TO_ASEG.get(key, key) if protocol == "freesurfer" else key
+                findings.append({
+                    "label": label, "atlas_label": key, "volume": 0.0,
+                    "atlas_min": ref["min"], "atlas_max": ref["max"],
+                    "kind": "missing", "factor": 0.0,
+                })
     return findings
 
 
@@ -160,7 +177,12 @@ def main() -> int:
             n_bad += 1
             continue
         findings = check_one(volumes, ranges, n_atlases, args.protocol,
-                             args.oversize_factor, args.undersize_factor)
+                             args.oversize_factor, args.undersize_factor,
+                             # quick warps one pre-fused template map, which
+                             # holds no right vessel or optic chiasm and one
+                             # voxel of left vessel, so absence there says
+                             # nothing about the subject.
+                             judge_missing=args.protocol == "neuromorphometrics")
         name = f.parent.parent.name or f.name
         if not findings:
             print(f"ok    {name}: {len(volumes)} labels all within "
