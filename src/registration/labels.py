@@ -54,7 +54,7 @@ def build_label_map(label_paths):
     """Build a contiguous map from the union of label ids across all atlases.
 
     Uses nibabel rather than ANTsPy so this is importable and testable without
-    antspyx, and reads with `dataobj` to avoid loading full volumes into memory.
+    antspyx. Each volume is read in full, one at a time.
     """
     values = {0}
     for path in label_paths:

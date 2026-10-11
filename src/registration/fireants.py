@@ -296,11 +296,11 @@ def warp_atlases(
 ):
     """Register every atlas to `target` and return warped atlases and labels.
 
-    `target_mask` is accepted because ants.joint_label_fusion needs it
-    downstream; it is deliberately not wired into the similarity loss. Both
-    sides of the metric are already skull-stripped (`masked_brain` is
-    N4 * BrainExtractionMask, and the OASIS-TRT-20 atlases are brain-only), so a
-    mask would change nothing while adding a difference from the reference.
+    `target_mask` restricts the similarity loss on the fixed side: with
+    LOSS_MASKED it becomes the trailing mask channel of the fixed image, and
+    each atlas gets its own nonzero mask. Both sides are skull-stripped, and an
+    unmasked CC scores the shared zero background as perfect agreement (see
+    LOSS_MASKED above).
 
     Returns (warped_atlas_images, warped_label_images) as ANTsImages.
     """
