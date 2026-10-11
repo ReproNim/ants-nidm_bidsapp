@@ -165,6 +165,24 @@ ants-nidm bids_dir output_dir participant \
   --nidm-input-dir /path/to/nidm/inputs
 ```
 
+### Running under BABS
+
+[`examples/babs-ants-nidm-bids-study.yaml`](examples/babs-ants-nidm-bids-study.yaml)
+is a complete BABS configuration. It uses the BIDS-study project layout from
+[PennLINC/babs#369](https://github.com/PennLINC/babs/pull/369); delete its three
+`*_path` settings to keep BABS's legacy layout. Two of its settings are required:
+
+- `zip_foldernames: {${subid}: ...}`, so each job zips its own `sub-<id>/`
+  folder. An app-name entry puts every subject's NIDM on the same path, and all
+  but the first are lost when the zips are merged.
+- `--nv` in `singularity_args` and `--gres=gpu:1` in the job resources, because
+  registration needs a GPU.
+
+BABS passes the positional level `participant` even for a project initialised
+at the session level, and gives the session through `$SESSION_SELECTION_FLAG`.
+When `--session-label` comes with `participant`, the app processes that session
+only, as it would at the `session` level.
+
 ### Command-line Arguments
 
 **Required:**

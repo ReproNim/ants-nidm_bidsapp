@@ -1,0 +1,77 @@
+# Example BABS configuration for ants-nidm 0.1.0.
+#
+# Uses the BIDS-study project layout from PennLINC/babs#369. To keep BABS's
+# legacy layout instead, delete the three *_path settings below.
+#
+# Replace the ${...} placeholders before running `babs init`.
+analysis_path: "."
+input_ria_path: ".babs/input_ria"
+output_ria_path: ".babs/output_ria"
+
+input_datasets:
+    BIDS:
+        required_files:
+            - "anat/*_T1w.nii*"
+        is_zipped: false
+        origin_url: "${BIDS_ORIGIN}"
+        path_in_babs: sourcedata/BIDS
+    # Optional. The app reads <bids_dir>/../NIDM by default, which is this
+    # mounted dataset, and adds its measurements to each subject's nidm.ttl.
+    NIDM:
+        required_files:
+            - "nidm.ttl"
+        is_zipped: false
+        origin_url: "${NIDM_ORIGIN}"
+        path_in_babs: sourcedata/NIDM
+
+bids_app_args:
+    $SUBJECT_SELECTION_FLAG: "--participant-label"
+    # For a project initialised with processing level "session", uncomment.
+    # BABS still passes the positional level `participant`; the app treats
+    # participant plus --session-label as a session job.
+    # $SESSION_SELECTION_FLAG: "--session-label"
+    --num-threads: "16"
+    # The BABS-mounted BIDS input is a sparse checkout of one subject, which
+    # the pybids validator rejects; the app finds its own T1w.
+    --skip-bids-validation: ""
+
+singularity_args:
+    # Required: registration runs on the GPU and the app stops with
+    # DeviceUnavailable when none is visible. Pairs with --gres=gpu:1 below.
+    - --nv
+    - --userns
+    - --no-home
+    - --writable-tmpfs
+
+# The app writes <output>/sub-<id>/... (per-subject layout), so each job zips
+# its own subject folder. ${subid} is expanded by bash inside the job script,
+# not by BABS. An app-name folder here would make every subject's NIDM land on
+# the same path and all but the first be lost when the zips are merged.
+zip_foldernames:
+    ${subid}: "0-1-0"
+
+cluster_resources:
+    interpreting_shell: "/bin/bash"
+    # 48G host RAM is what a full run is known to complete on. The default
+    # --fireants-batch-size of 5 needs about 20 GB of GPU memory.
+    customized_text: |
+        #SBATCH --partition=${PARTITION}
+        #SBATCH --gres=gpu:1
+        #SBATCH --cpus-per-task=16
+        #SBATCH --mem=48G
+        #SBATCH --time=04:00:00
+
+script_preamble: |
+    # Load site-specific Apptainer/DataLad modules or activate BABS here.
+    module load apptainer
+
+job_compute_space: "${COMPUTE_SPACE}"
+
+alert_log_messages:
+    stdout:
+        - "ERROR:"
+        - "Cannot allocate memory"
+        - "Segmentation failed"
+        - "Error in NIDM conversion"
+    stderr:
+        - "DeviceUnavailable"

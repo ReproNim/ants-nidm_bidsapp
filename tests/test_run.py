@@ -416,6 +416,18 @@ class TestRun(unittest.TestCase):
             mock_instance.run_subject.assert_called_once()
             mock_nidm.assert_called_once()
 
+    def test_participant_level_with_session_uses_session_pipeline(self):
+        """BABS always passes the positional level `participant`, even for a
+        session-wise project, and supplies the session as --session-label.
+        Ignoring it would process a multi-session subject as one session."""
+        args = MagicMock(session_label="ses-01")
+
+        with patch("src.run.process_session", return_value=0) as mock_session:
+            result = process_participant(args, self.logger)
+
+        self.assertEqual(result, 0)
+        mock_session.assert_called_once_with(args, self.logger)
+
     def test_process_participant_segmentation_failure_skips_nidm(self):
         """run_subject() returning False must not fall through to a NIDM
         conversion that would report success anyway -- exactly the

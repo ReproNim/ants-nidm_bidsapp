@@ -466,7 +466,17 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
         return False
 
 def process_participant(args, logger):
-    """Run the participant level analysis for single-session datasets."""
+    """Run the participant level analysis, including BABS session-wise jobs.
+
+    BABS always passes the positional level `participant`, even for a project
+    initialised at the session level, and supplies the session as
+    --session-label. That combination is a session job, so it goes to
+    process_session; without a session label this is a single-session run.
+    """
+    if args.session_label:
+        logger.info("Session label given with participant level; processing that session")
+        return process_session(args, logger)
+
     logger.info("Starting participant level analysis (single-session dataset)")
 
     # Initialize app
