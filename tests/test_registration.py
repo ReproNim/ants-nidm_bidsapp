@@ -485,3 +485,23 @@ def test_warp_atlases_handles_a_reoriented_atlas_header(tmp_path, fast_registrat
         f"Dice {dice:.3f} for an ASL-stored atlas against a RAS target: "
         "direction cosines are not being honoured somewhere in the FireANTs path"
     )
+
+
+def test_template_registration_refuses_a_folded_warp(tmp_path, monkeypatch):
+    """--method quick pulls the template labels through this warp, so a
+    folding warp must stop the subject, as it does for an atlas warp."""
+    import nibabel as nib
+
+    from src.registration import fireants as mod
+
+    ants = pytest.importorskip("ants")
+    shape = (32, 32, 32)
+    vol = np.zeros(shape, dtype=np.float32)
+    vol[8:16, 8:16, 8:16] = 1.0
+    path = tmp_path / "box.nii.gz"
+    nib.save(nib.Nifti1Image(vol, np.eye(4)), str(path))
+    img = ants.image_read(str(path))
+
+    monkeypatch.setattr(mod, "folding_fraction", lambda *a, **k: [0.01])
+    with pytest.raises(RuntimeError, match="folded"):
+        mod.register_to_template(img, img, temp_dir=tmp_path / "work", device="cpu")

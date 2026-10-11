@@ -452,22 +452,7 @@ def warp_atlases(
         # criterion 7 says "for every atlas registration").
         foldings = folding_fraction(syn, fixed_batch, moving_batch)
         for k, folding in enumerate(foldings):
-            atlas = chunk[k][0]
-            log.info(
-                "Non-positive Jacobian determinants, atlas %d (%s): %.4f%%",
-                index + k,
-                atlas.name,
-                folding * 100.0,
-            )
-            if folding > MAX_FOLDING_FRACTION:
-                raise RuntimeError(
-                    f"registration folded for atlas {index + k} ({atlas}): "
-                    f"{folding * 100:.3f}% of voxels have a non-positive "
-                    f"Jacobian determinant (limit "
-                    f"{MAX_FOLDING_FRACTION * 100:.3f}%). The warp is not "
-                    f"diffeomorphic; the segmentation would be wrong in a way "
-                    f"Dice against a single reference may not reveal."
-                )
+            _refuse_folding(folding, f"atlas {index + k} ({chunk[k][0]})", log)
 
         if label_interpolation == "genericlabel":
             label_batch = BatchedImages(
@@ -531,6 +516,19 @@ def warp_atlases(
 
     log.info("Warped %d atlases", len(warped_atlases))
     return warped_atlases, warped_labels
+
+
+def _refuse_folding(folding, what, log):
+    """Log a warp's folding fraction and raise above MAX_FOLDING_FRACTION."""
+    log.info("Non-positive Jacobian determinants, %s: %.4f%%", what, folding * 100.0)
+    if folding > MAX_FOLDING_FRACTION:
+        raise RuntimeError(
+            f"registration folded for {what}: {folding * 100:.3f}% of voxels "
+            f"have a non-positive Jacobian determinant (limit "
+            f"{MAX_FOLDING_FRACTION * 100:.3f}%). The warp is not "
+            f"diffeomorphic; the segmentation would be wrong in a way "
+            f"Dice against a single reference may not reveal."
+        )
 
 
 def folding_fractions_from_det(det):
@@ -714,6 +712,9 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     else:
         raise ValueError(f"DEFORMABLE must be 'syn' or 'greedy', got {DEFORMABLE!r}")
     syn.optimize()
+    # --method quick pulls the template labels through this warp, so the
+    # atlas gate applies here too.
+    _refuse_folding(folding_fraction(syn, fixed_batch, moving_batch)[0], "the template", log)
 
     # TemplateWarp only ever calls the deformable stage's own registration
     # methods (get_warp_parameters etc.) on fixed_batch/moving_batch, which
