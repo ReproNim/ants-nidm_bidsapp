@@ -14,8 +14,7 @@ This script checks the actual root cause: `quick` warps
 `OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_OASIS-30_v2.nii.gz` (the single
 pre-fused template-space label map), but the rest of the app -- `fusion`'s
 live per-atlas registration, the delivered reference derivative, and the
-tier-3 gate's label semantics (see docs/superpowers/specs/
-2026-09-01-fireants-engine-design.md and label_boundary_analysis.py) -- all
+tier-3 gate's label semantics (see label_boundary_analysis.py) -- all
 derive from `OASIS-TRT-20_DKT31_CMA_labels_v2/` (the per-atlas label files).
 These are DIFFERENT label vocabularies that happen to share a numeric range:
 the pre-fused template file's ids look like standard FreeSurfer aseg codes

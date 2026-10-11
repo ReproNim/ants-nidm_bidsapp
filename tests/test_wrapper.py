@@ -813,7 +813,7 @@ class TestANTsSegmentation(unittest.TestCase):
         """The container sets TMPDIR=/work and run_container.sh plus both
         sbatch scripts bind a writable directory there. Nothing read it, so
         ~1-2 GB of per-subject registration scratch went to the output tree
-        instead (spec section 4: every crossing goes through a file on
+        instead (every ANTsPy/FireANTs crossing goes through a file on
         TMPDIR)."""
         with patch('src.antspy.wrapper.ANTsSegmentation._load_templates'), \
              patch.dict(os.environ, {'TMPDIR': str(self.temp_dir / 'work')}):

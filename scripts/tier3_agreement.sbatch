@@ -50,7 +50,7 @@ done
 # guaranteed nibabel or numpy and certainly no fireants -- so the expected
 # outcome was ModuleNotFoundError, and the failure mode if numpy and nibabel
 # happened to resolve was worse: surface_metrics silently NaN-filled every
-# surface-Dice and Hausdorff value that spec section 8 requires be reported,
+# surface-Dice and Hausdorff value this gate must report,
 # and the run still printed TIER 3 PASS. tier3_agreement.py now refuses to
 # start without fireants.scripts.evalutils rather than degrading.
 apptainer exec \

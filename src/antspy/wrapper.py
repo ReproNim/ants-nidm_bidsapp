@@ -88,8 +88,8 @@ class ANTsSegmentation:
         #   2. $TMPDIR, which the container sets to the writable /work bind
         #      that run_container.sh and both sbatch scripts already mount.
         #      Nothing read it before, so ~1-2 GB of warped-atlas scratch per
-        #      subject went to the output tree instead (spec section 4 says
-        #      every crossing goes through a file on TMPDIR);
+        #      subject went to the output tree instead (every ANTsPy/FireANTs
+        #      crossing goes through a file on TMPDIR);
         #   3. output_dir/tmp, the previous behaviour, as a last resort, and
         #      when $TMPDIR is read-only or too small (BABS's --writable-tmpfs);
         #      see _usable_tmpdir_or_output_tree.

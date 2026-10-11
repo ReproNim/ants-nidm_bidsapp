@@ -77,8 +77,7 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     mkdir -p /opt/src
     mkdir -p /opt/data
 
-    # CUDA torch + FireANTs. Registration is GPU-only; see
-    # docs/superpowers/specs/2026-09-01-fireants-engine-design.md.
+    # CUDA torch + FireANTs. Registration is GPU-only.
     # --index-url, not --extra-index-url, and an exact pin. With the extra
     # index pip takes the newest torch across BOTH indices; on 2026-09-07 that
     # resolved to torch 2.14.0 from PyPI with CUDA 13 wheels, a major-version

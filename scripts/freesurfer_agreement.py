@@ -20,7 +20,7 @@ fusion emits Neuromorphometrics subcortical ids and quick emits aseg ids
 directly and reported under the same Neuromorphometrics keys.
 
 For comparison, the fusion with usecor=True on 6 Caltech subjects (offline
-dumps, docs/superpowers/specs/analysis/jlf_validation_6sub_2026-10-10.json)
+dumps, recorded as jlf_validation_6sub_2026-10-10.json)
 had group Dice WM-like 0.86, GM subcortical 0.86, CSF 0.89, cortex 0.72, and
 BVOL within 0.8-4.2% of BrainSegVol.
 

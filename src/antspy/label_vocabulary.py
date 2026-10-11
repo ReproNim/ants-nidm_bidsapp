@@ -36,7 +36,7 @@ structural check on the TTL.
 This module only states the correspondence. It deliberately does not decide
 which vocabulary the app should emit; see
 ``scripts/diag_label_vocabulary_correspondence.py`` for the evidence behind
-each entry and ``docs/superpowers/specs/analysis/`` for the recorded run.
+each entry, which it re-derives on each run.
 
 Provenance
 ----------

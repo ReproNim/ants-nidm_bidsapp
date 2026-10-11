@@ -4,7 +4,7 @@ The only module in this package that imports `fireants` or `torch`. Everything
 else stays importable without them so CI can run the geometry, label, and
 device tests unconditionally.
 
-Design constraints enforced here (spec section 4):
+Design constraints enforced here:
   * Images cross to and from ANTsPy as NIfTI files, never as arrays with a
     hand-rebuilt header. Registration outputs are tensors, so their header is
     copied wholesale from the fixed image via SimpleITK CopyInformation --
@@ -77,7 +77,7 @@ GREEDY_ITERATIONS = [250, 200, 100]
 GREEDY_LR = 0.5
 GREEDY_CC_KERNEL_SIZE = 7
 
-# Spec section 8 criterion 7. A folding warp is provably bad independently of
+# Folding gate. A folding warp is provably bad independently of
 # Dice; the ANTs path being replaced had no equivalent check.
 MAX_FOLDING_FRACTION = 0.001
 
@@ -448,8 +448,8 @@ def warp_atlases(
         moved = syn.evaluate(fixed_batch, moving_batch)[:, :1]
 
         # Checked per atlas, not as a batch mean: one folding atlas among
-        # twenty clean ones is invisible in the average (spec section 8
-        # criterion 7 says "for every atlas registration").
+        # twenty clean ones is invisible in the average; the gate applies to every
+        # atlas registration.
         foldings = folding_fraction(syn, fixed_batch, moving_batch)
         for k, folding in enumerate(foldings):
             _refuse_folding(folding, f"atlas {index + k} ({chunk[k][0]})", log)
@@ -542,8 +542,8 @@ def folding_fractions_from_det(det):
     Reduces over the spatial axes only. Flattening the whole [N, ...] tensor
     and taking one mean dilutes a folding atlas by the N-1 clean ones: at the
     default batch_size=0 (N=20) an atlas folding on 2% of its voxels shows up
-    as a 0.1% batch mean and slips under the gate. Spec section 8 criterion 7
-    is "for every atlas registration", not for their average.
+    as a 0.1% batch mean and slips under the gate. The gate is for every atlas
+    registration, not for their average.
     """
     n = det.shape[0]
     bad = (det <= 0).reshape(n, -1)
@@ -555,7 +555,7 @@ def folding_fraction(registration, fixed_batch, moving_batch):
     value per batch element in batch order.
 
     A folding warp is provably bad independently of Dice, and the ANTs path
-    being replaced had no such check. Spec section 8 criterion 7 gates this at
+    being replaced had no such check. MAX_FOLDING_FRACTION gates this at
     0.1% per registration. Mirrors the diffeomorphism check in FireANTs' own
     tutorials/tutorial1_basic_usage.py.
     """

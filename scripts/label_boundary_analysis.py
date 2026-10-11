@@ -4,8 +4,8 @@ using properties of the OASIS-TRT-20 atlas geometry alone -- computed with no
 knowledge of any pipeline's Dice, so it cannot be reverse-engineered from a
 particular run's failures.
 
-Motivation (2026-09-14/17): after the tier-3 tuning campaign in
-docs/superpowers/specs/2026-09-01-fireants-engine-design.md moved primary-label
+Motivation (2026-09-14/17): after the tier-3 tuning campaign of the
+FireANTs engine work moved primary-label
 median Dice from 0.81 (SyN) to 0.85 (Greedy), four labels still missed the
 per-label floor on every one of the three Caltech subjects tested, under both
 registration algorithms: 40, 41 (primary tier) and 49, 50 (already relaxed

@@ -219,8 +219,7 @@ def test_inbound_guard_catches_a_reoriented_load(tmp_path):
     """Negative control: the guard has teeth.
 
     `fireants.io.Image.__init__` accepts an `orientation` argument that runs
-    sitk.DICOMOrient and rewrites the header (spec section 4 names it as a
-    footgun). Production never passes it -- but if it ever did, or if
+    sitk.DICOMOrient and rewrites the header, a known hazard. Production never passes it -- but if it ever did, or if
     SimpleITK read the file differently for any other reason, the inbound
     guard must fail rather than let a silently reoriented volume through.
     """

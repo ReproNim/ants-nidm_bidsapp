@@ -6,7 +6,6 @@ and both ANTsPy and SimpleITK are well-tested readers of it. Pulling a numpy
 array out of an ANTsImage and reattaching spacing/origin/direction on the other
 side is the failure mode this module exists to make impossible.
 
-See docs/superpowers/specs/2026-09-01-fireants-engine-design.md section 4.
 """
 from collections import namedtuple
 from pathlib import Path

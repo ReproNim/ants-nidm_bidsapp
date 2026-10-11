@@ -27,8 +27,8 @@ def _write_labels(tmp_path, name, values):
 
 
 # --------------------------------------------------------------------------
-# _chunks -- spec section 7 lists "batch_size chunking returns the same number
-# of atlases in the same order as a single full batch".
+# _chunks -- batch_size chunking must return the same number of atlases in the
+# same order as a single full batch.
 # --------------------------------------------------------------------------
 
 def test_chunks_of_zero_or_negative_is_one_full_batch():
@@ -100,8 +100,8 @@ def test_missing_fused_ops_is_onehot_on_either_device():
 
 
 # --------------------------------------------------------------------------
-# folding_fractions_from_det -- spec section 8 criterion 7 gates "every atlas
-# registration", not the batch mean.
+# folding_fractions_from_det -- the folding gate applies to every atlas
+# registration, not to the batch mean.
 # --------------------------------------------------------------------------
 
 def test_folding_is_reported_per_batch_element_not_as_one_mean():

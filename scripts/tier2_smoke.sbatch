@@ -3,7 +3,7 @@
 #
 # Proves the seam holds end to end -- FireANTs registers, ANTs fuses, outputs
 # land in the per-subject layout with nidm.ttl and ants_cde.ttl alongside
-# (spec section 7). It does NOT check segmentation quality; that is tier 3.
+# It does NOT check segmentation quality; that is tier 3.
 #
 # Usage:
 #   sbatch scripts/tier2_smoke.sbatch <sif> <bids_dir> <out_dir> <participant>
@@ -52,8 +52,8 @@ for METHOD in fusion quick; do
     # create it before the bind, not after -- otherwise this can fail at the
     # bind step, before the app even starts, on a GPU allocation.
     mkdir -p "${OUT}/${METHOD}"
-    # NIDM conversion is deliberately NOT skipped. Spec section 7 requires
-    # tier 2 to confirm outputs land in the per-subject layout *with nidm.ttl
+    # NIDM conversion is deliberately NOT skipped. Tier 2 exists
+    # to confirm outputs land in the per-subject layout *with nidm.ttl
     # and ants_cde.ttl present*; --skip-nidm turned the one thing this tier is
     # supposed to prove into something it never exercised. The app falls back
     # to producing a fresh NIDM graph when no input NIDM is found, so no extra

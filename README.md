@@ -281,8 +281,7 @@ Output files include:
 
 ## Validation harnesses
 
-`scripts/` carries the GPU test tiers from the FireANTs design
-(`docs/superpowers/specs/2026-09-01-fireants-engine-design.md` section 7):
+`scripts/` carries the GPU test tiers for the FireANTs registration engine:
 
 - `scripts/tier2_smoke.sbatch <sif> <bids> <out> <participant>` -- one subject
   through both methods on a GPU node, asserting the per-subject layout plus

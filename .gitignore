@@ -191,3 +191,6 @@ internal/
 
 # SDD execution workspace (ledger, briefs, review packages)
 .superpowers/
+
+# Plans, specs and analysis results live in the vault (projects/ants-nidm_bidsapp/)
+docs/superpowers/

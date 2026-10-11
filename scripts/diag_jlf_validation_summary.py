@@ -28,8 +28,8 @@ Each <dump_dir> is a diag_dump_warped_atlases.py output with the variants under
 <dump_dir>/sweep/<variant>/fusion_dseg.nii.gz. Missing variants are skipped.
 
 Result on 6 Caltech subjects (0051456/57/63/70/78/86; dumps + sweeps from
-jobs 24711231, 24719700-24719711; JSON in
-docs/superpowers/specs/analysis/jlf_validation_6sub_2026-10-10.json),
+jobs 24711231, 24719700-24719711; JSON recorded
+as jlf_validation_6sub_2026-10-10.json),
 group mean Dice with FreeSurfer (mean |log2 volume ratio|):
 
               WM-like      GM subcort   CSF          cortex

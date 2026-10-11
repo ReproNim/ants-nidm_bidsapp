@@ -52,8 +52,7 @@ RUN pip3 install --no-cache-dir \
     nipype \
     antspyx
 
-# CUDA torch + FireANTs. Registration is GPU-only; see
-# docs/superpowers/specs/2026-09-01-fireants-engine-design.md.
+# CUDA torch + FireANTs. Registration is GPU-only.
 RUN pip3 install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cu121 \
         "torch==2.5.1+cu121" && \

@@ -77,7 +77,7 @@ def test_all_subjects_shape_mismatching_reports_why(tier3, tmp_path, monkeypatch
 
 
 def test_missing_evalutils_stops_the_run_instead_of_nan_filling(tier3, monkeypatch):
-    """Spec section 8 requires surface Dice and Hausdorff for every gated
+    """Surface Dice and Hausdorff are required for every gated
     label, so an absent harness invalidates the report -- it must not become a
     column of NaNs under a TIER 3 PASS banner."""
     monkeypatch.setitem(sys.modules, "fireants.scripts.evalutils", None)

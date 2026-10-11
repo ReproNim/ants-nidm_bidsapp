@@ -55,8 +55,8 @@ BVOL_RANGE_L = (1.29, 1.94)
 #     converging evidence (cross-algorithm, cross-subject persistence +
 #     atlas-geometry outlier rank), the same pattern already used for the
 #     PRESENCE_FRACTION and report-only exclusions below, not as a formula.
-# Raw numbers: docs/superpowers/specs/analysis/label_boundary_analysis_2026-09-17.json
-# (committed, reproducible by rerunning the script against the atlas dir).
+# Raw numbers: label_boundary_analysis_2026-09-17.json, reproducible by
+# rerunning scripts/label_boundary_analysis.py against the atlas dir.
 BOUNDARY_CONCENTRATION_RELAXED = {40, 41}
 
 
@@ -94,7 +94,7 @@ def load_evalutils():
     This used to be a per-call `try: ... except ImportError: return empty`,
     which turned "the harness is not installed" into a report where every
     surface-Dice and Hausdorff column was NaN -- and the run still printed
-    TIER 3 PASS. Spec section 8 requires those metrics be reported for every
+    TIER 3 PASS. Those metrics must be reported for every
     gated label, so a missing harness is a failure of the run, not a column of
     blanks. Resolved once, up front, before any subject is read.
     """
@@ -107,7 +107,7 @@ def load_evalutils():
     except ImportError as exc:
         sys.exit(
             "cannot import fireants.scripts.evalutils "
-            f"({exc}). Spec section 8 requires surface Dice and Hausdorff for "
+            f"({exc}). Surface Dice and Hausdorff are required for "
             "every gated label, so this run cannot produce a valid report. "
             "Run this script inside the container -- "
             "`apptainer exec <sif> python3 /scripts/tier3_agreement.py ...` -- "
@@ -126,7 +126,7 @@ def surface_metrics(evalutils, new, ref, label, voxel_mm3):
 
     Reported, not gated: no reference distribution exists for them yet. They
     catch boundary degradation that volumetric Dice hides on large structures,
-    and establish the baseline for future runs (spec section 8).
+    and establish the baseline for future runs.
 
     A NaN here means the label is absent from one of the two segmentations --
     a genuine property of the data. It never means the harness was missing;

@@ -23,8 +23,8 @@ max_lab_plus_one=True):
                 mean squared difference is not scale-invariant
   normtarget_usecor  both of the above
 
-Result on sub-0051456 (Oct 3, jobs 24713328 and 24715225; scored JSON in
-docs/superpowers/specs/analysis/jlf_sweep_<variant>_sub-0051456_2026-10-03.json),
+Result on sub-0051456 (Oct 3, jobs 24713328 and 24715225; scored JSON
+recorded as jlf_sweep_<variant>_sub-0051456_2026-10-03.json),
 volume / FreeSurfer (Dice with FreeSurfer):
 
               brain stem   R cblm WM    R pallidum   R caudate    R lat vent

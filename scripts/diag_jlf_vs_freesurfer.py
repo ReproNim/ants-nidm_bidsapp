@@ -18,8 +18,8 @@ estimate/FreeSurfer (off / on / mass):
              lateral ventricles ~4.3/3.5/3.3, 3rd ventricle 4.0/3.5/2.9
 Most also sit outside the atlas min-max. White-matter-intensity structures
 shrink, grey-matter/CSF structures grow, for every estimator -- the bias is in
-the fused posterior, not in the flag. Results:
-docs/superpowers/specs/analysis/jlf_vs_freesurfer_2026-09-26.json
+the fused posterior, not in the flag. Results recorded as
+jlf_vs_freesurfer_2026-09-26.json.
 
 Note: label_vocabulary maps 38/39 to aseg 45/6 (Cerebellum-Exterior), which
 aseg.stats never reports, so cerebellar cortex is not compared here.

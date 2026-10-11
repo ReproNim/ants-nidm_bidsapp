@@ -8,7 +8,7 @@ answers two questions on one subject, using the production code path
 
 1. WHERE are the folded voxels -- inside the brain mask, where labels live,
    or in the zero background outside it?
-2. How far does each sanctioned tuning lever (spec risk table: SyN learning
+2. How far does each sanctioned tuning lever (SyN learning
    rate, smoothing sigmas) move the per-atlas folding fraction, and what does
    it cost in a cheap accuracy proxy (majority-vote Dice against the
    delivered ANTs derivative)?
@@ -154,7 +154,7 @@ def main():
     import ants as _ants
     ref_img = _ants.image_read(args.reference_dseg)
     vox_mm3 = float(np.prod(ref_img.spacing))
-    # Spec section 8 groups, from the reference cohort's median label volumes.
+    # Tier-3 volume groups, from the reference cohort's median label volumes.
     import csv, glob as _glob
     cohort = {}
     for f in _glob.glob(str(Path(args.reference_dseg).parents[2] / "sub-*/stats/*antslabelstats.csv")):
