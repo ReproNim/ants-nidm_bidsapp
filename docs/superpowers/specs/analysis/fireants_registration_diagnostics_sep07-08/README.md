@@ -21,7 +21,7 @@ What the sweeps established, and where it now lives:
   geometry check.
 
 Regenerating any of the deleted volumes requires a GPU allocation; nothing in
-the current test suite depends on them. Note that the untracked
-`scripts/verify_quick_fix.sbatch` bind-mounts `ants-fireants-diag_sep07`, so
-that script no longer runs as written. Its question, the `--method quick`
-label vocabulary, was answered separately and is fixed on `fireants-engine`.
+the current test suite depends on them. The ad hoc `--method quick` checks
+that read `ants-fireants-diag_sep07` were deleted with it; their question,
+the label vocabulary, was answered separately and is fixed on
+`fireants-engine`.
