@@ -130,9 +130,11 @@ GPU checks, run as Slurm jobs against a built image:
   `src/` over the image's, to test a change without rebuilding.
 - `scripts/diag_jlf_leave_one_out.sbatch <sif> <out>` holds out each
   OASIS-TRT-20 atlas in turn, fuses the other 19 and scores the result against
-  the held-out manual labels. This is the accuracy measure with a ground truth.
-- `scripts/tier3_agreement.sbatch <sif> <out>` compares three subjects with a
-  reference derivative.
+  the held-out manual labels: the accuracy measure with a ground truth. Run
+  `scripts/diag_jlf_leave_one_out_summary.py <out> --gate` on the result; it
+  exits 1 unless every fold reaches `GATE_MIN_DICE` in each structure group.
+  The floors sit 0.03 below the worst fold of a validated run; the fusion
+  without `usecor` fails every group on every fold.
 
 Checks on outputs, no GPU needed:
 

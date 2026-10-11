@@ -1,7 +1,8 @@
 """FireANTs backend tests on tiny CPU volumes.
 
-Registration quality is not under test here -- that is tier 2 and tier 3 on a
-GPU. What is under test is the wiring most likely to be silently wrong: label
+Registration quality is not under test here -- that is the tier-2 smoke run
+and the leave-one-out gate on a GPU. What is under test is the wiring most
+likely to be silently wrong: label
 shape handling, remapping round trips, and the geometry of what comes back.
 """
 import numpy as np

@@ -286,10 +286,11 @@ Output files include:
 - `scripts/tier2_smoke.sbatch <sif> <bids> <out> <participant>` -- one subject
   through both methods on a GPU node, asserting the per-subject layout plus
   `nidm.ttl` and `ants_cde.ttl`.
-- `scripts/tier3_agreement.sbatch <sif> <out>` -- three ABIDE Caltech subjects
-  compared against the delivered ANTs derivative, with volume-stratified Dice
-  and volume thresholds. The comparison runs inside the container, because it
-  needs FireANTs' own `scripts/evalutils.py`.
+- `scripts/diag_jlf_leave_one_out.sbatch <sif> <out>` -- the accuracy gate.
+  Each of the 20 OASIS-TRT-20 atlases is held out in turn, the other 19 are
+  registered to it and fused, and the result is scored against its manual
+  labels. `scripts/diag_jlf_leave_one_out_summary.py <out> --gate` then
+  requires every fold to reach a Dice floor in each structure group.
 - `scripts/freesurfer_agreement.py <app_out> --subject <id>` -- report only:
   Dice and volume ratio of the delivered dseg against FreeSurfer's
   `aparc.DKTatlas+aseg`, and BVOL against FreeSurfer's BrainSegVol. FreeSurfer

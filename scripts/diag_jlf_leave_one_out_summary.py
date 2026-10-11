@@ -8,7 +8,18 @@ the production fusion and the old usecor=False fusion:
   - the per-fold intensity medians, which say whether the folds reproduce the
     target/atlas scale mismatch seen on real scans.
 
-    python scripts/diag_jlf_leave_one_out_summary.py <loo_dir> [--json out.json]
+With --gate it is the accuracy gate for a release: every fold of the
+production fusion must reach GATE_MIN_DICE in every structure group, and the
+script exits 1 otherwise.
+
+    python scripts/diag_jlf_leave_one_out_summary.py <loo_dir> [--json out.json] [--gate]
+
+Result on 20 folds (jobs 25557911/12/14, Oct 11; N4 put each held-out target
+at an in-mask median of 3000-5600 against ~1130 for the warped atlases, so the
+folds do reproduce the scale mismatch): production overall Dice 0.78-0.82 per
+fold, old usecor=False fusion 0.31-0.38. Mean Dice / worst fold by group,
+production: WM-like 0.889/0.877, GM subcortical 0.896/0.852, CSF 0.846/0.785,
+all subcortical 0.776/0.734, cortex 0.823/0.810, all 0.805/0.782.
 """
 import argparse
 import json
@@ -19,6 +30,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from diag_jlf_validation_summary import GROUPS, KEY  # noqa: E402
+
+
+#: Per-fold Dice floors for --gate: 0.03 below the worst production fold of
+#: the Oct 11 run in each group, rounded down, so GPU nondeterminism does not
+#: trip it while a regression of the size of the usecor=False bias (overall
+#: Dice 0.31-0.38) fails every group.
+GATE_MIN_DICE = {"wm_like": 0.84, "gm_subcort": 0.82, "csf": 0.75,
+                 "subcort_all": 0.70, "cortex": 0.78, "all": 0.75}
 
 
 def group_ids(scores):
@@ -36,10 +55,26 @@ def stats(scores, ids):
                 abs_log2=float(np.mean(np.abs(lr))), signed_log2=float(np.mean(lr)), n=len(rows))
 
 
+def gate(folds, variant="production"):
+    """One failure dict per (fold, group) below GATE_MIN_DICE; [] passes."""
+    failures = []
+    for f in folds:
+        scores = f["scores"][variant]
+        for g, ids in group_ids(scores).items():
+            if not ids:
+                continue
+            d = stats(scores, ids)["dice"]
+            if d < GATE_MIN_DICE[g]:
+                failures.append(dict(fold=f["fold"], group=g, dice=d, floor=GATE_MIN_DICE[g]))
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("loo_dir")
     ap.add_argument("--json")
+    ap.add_argument("--gate", action="store_true",
+                    help="exit 1 unless every production fold meets GATE_MIN_DICE")
     a = ap.parse_args()
 
     folds = [json.loads(p.read_text()) for p in sorted(Path(a.loo_dir).glob("atlas-*/scores.json"))]
@@ -85,9 +120,17 @@ def main():
 
     for f in folds:
         res["per_fold"][f["fold"]] = {v: stats(f["scores"][v], groups["all"])["dice"] for v in variants}
+    if a.gate:
+        failures = gate(folds)
+        res["gate"] = dict(floors=GATE_MIN_DICE, failures=failures, passed=not failures)
     if a.json:
         Path(a.json).write_text(json.dumps(res, indent=1))
+    if a.gate:
+        for x in failures:
+            print(f"GATE FAIL fold {x['fold']} {x['group']}: Dice {x['dice']:.3f} < {x['floor']}")
+        print(f"LEAVE-ONE-OUT GATE {'FAIL' if failures else 'PASS'} ({len(folds)} folds)")
+        return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

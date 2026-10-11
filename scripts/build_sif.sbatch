@@ -10,7 +10,7 @@
 #   sbatch scripts/build_sif.sbatch [out.sif]
 # Default output: ~/simple2_bidsapp_babs/ants-nidm_bidsapp_fireants.sif
 # (never the canonical ants-nidm_bidsapp.sif -- that is the ANTs build that
-# produced the Caltech derivative tier 3 compares against).
+# produced the delivered Caltech derivative).
 #SBATCH --job-name=ants-fireants-sifbuild
 #SBATCH --partition=mit_normal
 #SBATCH --cpus-per-task=8

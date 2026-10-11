@@ -3,7 +3,7 @@
 #
 # Proves the seam holds end to end -- FireANTs registers, ANTs fuses, outputs
 # land in the per-subject layout with nidm.ttl and ants_cde.ttl alongside
-# It does NOT check segmentation quality; that is tier 3.
+# It does NOT check segmentation quality; the leave-one-out gate does.
 #
 # Usage:
 #   sbatch scripts/tier2_smoke.sbatch <sif> <bids_dir> <out_dir> <participant>
