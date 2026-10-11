@@ -555,6 +555,42 @@ class TestANTsSegmentation(unittest.TestCase):
         self.assertIs(mock_jlf.call_args.kwargs["atlas_list"], warped_imgs)
         self.assertIs(mock_jlf.call_args.kwargs["label_list"], warped_labs)
 
+    def test_only_quick_registers_to_the_template(self):
+        """The subject-to-template warp is used by 'quick' alone. Under
+        'fusion' it was one more GPU registration whose result stayed on the
+        device through warp_atlases and could fail the subject."""
+        from unittest.mock import patch
+
+        for method, wanted in (("fusion", False), ("quick", True)):
+            with patch.object(self.segmenter, "compute_cortical_thickness",
+                              side_effect=RuntimeError("stop")) as mock_ct:
+                with self.assertRaises(RuntimeError):
+                    self.segmenter.segment_image(mock_image_read(), method=method)
+            self.assertEqual(mock_ct.call_args.kwargs.get("register_template"), wanted, method)
+
+    def test_preprocessing_without_template_registration(self):
+        """register_template=False runs N4 and brain extraction only."""
+        from unittest.mock import patch
+
+        def fake_subprocess_run(cmd, *args, **kwargs):
+            cmd = [str(c) for c in cmd]
+            if any("antsBrainExtraction" in c for c in cmd) and "-o" in cmd:
+                Path(cmd[cmd.index("-o") + 1] + "BrainExtractionMask.nii.gz").touch()
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("src.antspy.wrapper.register_to_template") as mock_reg, \
+             patch("src.antspy.wrapper.ants.image_write", side_effect=lambda img, path: None), \
+             patch("src.antspy.wrapper.ants.n4_bias_field_correction",
+                   side_effect=lambda img, **k: mock_image_read()), \
+             patch("src.antspy.wrapper.shutil.which", return_value="/fake/antsBrainExtraction.sh"), \
+             patch("src.antspy.wrapper.subprocess.run", side_effect=fake_subprocess_run):
+            results = self.segmenter.compute_cortical_thickness(
+                mock_image_read(), register_template=False)
+
+        mock_reg.assert_not_called()
+        self.assertNotIn("TemplateWarp", results)
+        self.assertIn("BrainExtractionMask", results)
+
     def test_fusion_asks_for_an_explicit_background_class(self):
         """ants.joint_label_fusion has no background class of its own. The
         brain mask is far larger than the union of the labelled structures, so

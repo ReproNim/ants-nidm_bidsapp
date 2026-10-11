@@ -329,7 +329,8 @@ class ANTsSegmentation:
         """
         # Run cortical thickness to get N4 correction and brain mask
         self.logger.info("Running cortical thickness pipeline for preprocessing")
-        thickness_results = self.compute_cortical_thickness(image)
+        thickness_results = self.compute_cortical_thickness(
+            image, register_template=(method == 'quick'))
         
         # Create masked brain image (equivalent to MultiplyImages node)
         self.logger.info("Creating masked brain image")
@@ -742,13 +743,16 @@ class ANTsSegmentation:
             self.logger.error(f"Error processing subject {subject_id}: {str(e)}")
             return False
         
-    def compute_cortical_thickness(self, image):
+    def compute_cortical_thickness(self, image, register_template=True):
         """Compute cortical thickness using ANTs.
         
         Parameters
         ----------
         image : ants.ANTsImage
             Input brain image
+        register_template : bool, optional
+            Also register the brain to the OASIS-30 template and return the
+            warp as 'TemplateWarp'. Only --method quick uses it.
             
         Returns
         -------
@@ -818,6 +822,15 @@ class ANTsSegmentation:
             # read back into memory.
             shutil.rmtree(abe_dir, ignore_errors=True)
 
+        # BrainExtractionMask is the canonical script's product, untouched: its
+        # Atropos refinement and morphology already finalized it.
+        results = {
+            'BrainSegmentationN4': n4_image,
+            'BrainExtractionMask': final_mask,
+        }
+        if not register_template:
+            return results
+
         brain_image = n4_image * final_mask
 
         # Register to the brain-only template. brain_image is skull-stripped at
@@ -845,12 +858,5 @@ class ANTsSegmentation:
                 logger=self.logger,
             )
 
-        # BrainExtractionMask is the canonical script's product, untouched: its
-        # Atropos refinement and morphology already finalized it.
-        results = {
-            'BrainSegmentationN4': n4_image,
-            'BrainExtractionMask': final_mask,
-            'TemplateWarp': template_warp,
-        }
-
+        results['TemplateWarp'] = template_warp
         return results
