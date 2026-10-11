@@ -521,21 +521,15 @@ class ANTsSegmentation:
 
         label_values, label_counts = np.unique(labels.astype(np.int64), return_counts=True)
         
-        # Filter out problematic labels:
-        # - 0: background
-        # - 21-23: FreeSurfer reference lines (spatial markers, not brain structures)
-        # - 75-76: Removed from FreeSurferColorLUT as duplicates of 4/43
-        # These are present in OASIS-TRT-20_DKT31_CMA_labels_v2 but should not be in stats
-        invalid_labels = [0, 21, 22, 23, 75, 76]
-        valid_mask = ~np.isin(label_values, invalid_labels)
+        # Only background is left out. Ids 21-23 and 75-76 used to be dropped
+        # as FreeSurfer reference lines and retired LUT entries, but --method
+        # fusion emits Neuromorphometrics ids (label_vocabulary.py), where 23
+        # is Right Accumbens and 75/76 the basal forebrain; quick's aseg map
+        # contains none of them.
+        valid_mask = label_values != 0
         label_values = label_values[valid_mask]
         label_counts = label_counts[valid_mask]
         label_volumes_mm3 = label_counts * voxel_volume
-        
-        # Log info if reference line labels were filtered
-        filtered_ref_lines = [lbl for lbl in [21, 22, 23] if lbl in np.unique(labels.astype(np.int64))]
-        if filtered_ref_lines:
-            self.logger.info(f"Filtered FreeSurfer reference line labels from stats output: {filtered_ref_lines}")
 
         label_volume_sum = float(label_volumes_mm3.sum()) if label_volumes_mm3.size else 0.0
 

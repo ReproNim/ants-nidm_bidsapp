@@ -440,6 +440,27 @@ class TestANTsSegmentation(unittest.TestCase):
                     {'segmentation': mock_seg, 'probabilityimages': []}, "01")
         self.assertIn("BrainExtractionMask", str(ctx.exception))
 
+    def test_label_stats_keep_every_structure(self):
+        """Only background is left out of the label stats. Ids 23, 75 and 76
+        are Right Accumbens and the basal forebrain in the Neuromorphometrics
+        protocol that --method fusion emits; an old filter dropped them as
+        FreeSurfer reference lines and retired LUT entries."""
+        mock_seg = MagicMock()
+        mock_seg.numpy.return_value = np.array([0, 23, 30, 75, 76, 76])
+        mock_seg.spacing = [1.0, 1.0, 1.0]
+        mock_mask = MagicMock()
+        mock_mask.numpy.return_value = np.ones(6)
+
+        with patch('src.antspy.wrapper.ants.image_write'):
+            self.segmenter._organize_bids_output(
+                {'segmentation': mock_seg, 'probabilityimages': [],
+                 'BrainExtractionMask': mock_mask}, "01")
+
+        with open(self.output_dir / "sub-01" / "stats" / "sub-01_antslabelstats.csv",
+                  newline='') as f:
+            volumes = {r["Label"]: int(float(r["VolumeInVoxels"])) for r in csv.DictReader(f)}
+        self.assertEqual(volumes, {"23": 1, "30": 1, "75": 1, "76": 2})
+
     def test_save_results(self):
         """Test save_results method with output directory handling"""
         # Create mock segmentation
