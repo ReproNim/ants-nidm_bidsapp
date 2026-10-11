@@ -216,8 +216,9 @@ def parse_arguments():
                         type=float, default=0.5)
     
     # Segmentation method
-    parser.add_argument('--method', help='Segmentation method to use [default: fusion]',
-                        choices=['quick', 'fusion'], default='fusion')
+    parser.add_argument('--method', help='Segmentation method to use [default: fusion]. '
+                        'With --skip-ants, required: the method that produced --ants-input',
+                        choices=['quick', 'fusion'], default=None)
     
     parser.add_argument('--skip-bids-validation', help='Skip BIDS validation step',
                         action='store_true')
@@ -263,6 +264,13 @@ def parse_arguments():
     # Validate arguments
     if args.skip_ants and not args.ants_input:
         parser.error("--skip-ants requires --ants-input to specify existing ANTs derivatives")
+    if args.method is None:
+        # The two methods number structures differently (LABEL_PROTOCOL_BY_METHOD),
+        # and nothing in existing derivatives records which one made them.
+        if args.skip_ants:
+            parser.error("--skip-ants requires --method: the method that produced "
+                         "--ants-input decides how its label ids are named")
+        args.method = 'fusion'
     if args.fireants_batch_size < 0:
         parser.error("--fireants-batch-size must be >= 0 (0 means all atlases at once)")
 

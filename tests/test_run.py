@@ -858,6 +858,23 @@ class TestRun(unittest.TestCase):
         self.assertEqual(args.fireants_batch_size, 5)
         self.assertEqual(args.label_interpolation, "nearest")
 
+    def test_skip_ants_requires_the_method_that_made_the_input(self):
+        """--skip-ants names the structures of --ants-input with the protocol
+        of --method. Defaulting to fusion would name quick derivatives (aseg
+        ids) with the Neuromorphometrics table: a valid, wrong NIDM file."""
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        base = ["ants-nidm", "/bids", "/out", "participant", "--skip-ants", "--ants-input", "/in"]
+        with patch.object(sys, "argv", base), self.assertRaises(SystemExit):
+            parse_arguments()
+        with patch.object(sys, "argv", base + ["--method", "quick"]):
+            self.assertEqual(parse_arguments().method, "quick")
+        with patch.object(sys, "argv", ["ants-nidm", "/bids", "/out", "participant"]):
+            self.assertEqual(parse_arguments().method, "fusion")
+
     def test_invalid_device_is_rejected(self):
         import sys
         from unittest.mock import patch

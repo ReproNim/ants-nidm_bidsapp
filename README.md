@@ -162,8 +162,13 @@ ants-nidm bids_dir output_dir participant \
   --participant-label 01 \
   --skip-ants \
   --ants-input /path/to/existing/ants-seg \
+  --method fusion \
   --nidm-input-dir /path/to/nidm/inputs
 ```
+
+`--method` is required here and must name the method that produced
+`--ants-input`: `fusion` and `quick` number subcortical structures differently,
+and the wrong one gives a valid NIDM file with wrong structure names.
 
 ### Running under BABS
 
@@ -226,6 +231,7 @@ only, as it would at the `session` level.
 
 **Input Options (for NIDM-only mode):**
 - `--ants-input`: Path to existing ANTs segmentation derivatives (required if `--skip-ants`)
+- `--method` is also required with `--skip-ants`, set to the method that produced `--ants-input`
 - `--nidm-input-dir`: Directory containing existing NIDM files (optional). The app will search for files matching `sub-{id}/[ses-{session}/]sub-{id}[_ses-{session}].ttl` or fallback to `nidm.ttl`
 
 **Other:**
