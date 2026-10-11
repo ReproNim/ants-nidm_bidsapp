@@ -16,7 +16,8 @@ SIF="${1:?usage: diag_folding.sbatch <sif> <out_dir> [participant]}"
 OUT="${2:?usage: diag_folding.sbatch <sif> <out_dir> [participant]}"
 SUB="${3:-0051456}"
 SCRIPTS="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts"
-DATASET=/orcd/data/satra/002/datasets/simple2_datalad/study-ABIDE/site-Caltech
+set -a; [[ -f .env ]] && . ./.env; set +a   # paths live in the gitignored .env
+DATASET="$(dirname "${CALTECH_DERIVATIVES:?set CALTECH_DERIVATIVES in .env}")"
 module load apptainer/1.5.2
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 mkdir -p "$OUT"

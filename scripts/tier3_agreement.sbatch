@@ -25,7 +25,8 @@ OUT="${2:?usage: tier3_agreement.sbatch <sif> <out_dir>}"
 SCRIPTS="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts"
 test -f "$SCRIPTS/tier3_agreement.py" || { echo "tier3_agreement.py not in $SCRIPTS; sbatch from the repo root" >&2; exit 2; }
 
-DATASET=/orcd/data/satra/002/datasets/simple2_datalad/study-ABIDE/site-Caltech
+set -a; [[ -f .env ]] && . ./.env; set +a   # paths live in the gitignored .env
+DATASET="$(dirname "${CALTECH_DERIVATIVES:?set CALTECH_DERIVATIVES in .env}")"
 BIDS="${DATASET}/sourcedata/raw"
 REFERENCE="${DATASET}/derivatives/babs-ants-nidm"
 SUBJECTS=(0051456 0051457 0051458)

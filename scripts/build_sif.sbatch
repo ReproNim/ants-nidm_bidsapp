@@ -25,7 +25,8 @@ set -euo pipefail
 REPO="${REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 test -f "$REPO/Singularity" || { echo "no Singularity in $REPO; sbatch from the repo root" >&2; exit 2; }
 OUT="${1:-$HOME/simple2_bidsapp_babs/ants-nidm_bidsapp_fireants.sif}"
-SCRATCH=/orcd/scratch/bcs/002/yibei
+set -a; [[ -f .env ]] && . ./.env; set +a   # paths live in the gitignored .env
+SCRATCH="${SCRATCH:?set SCRATCH in .env to a large scratch directory}"
 
 # 1.5.2, not 1.1.9: the canonical Aug 30 SIF carries the label
 # usage.apptainer.version: 1.5.2-1.el8, so this is the version known to get
