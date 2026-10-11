@@ -17,6 +17,10 @@ from natsort import natsorted
 from src.registration import apply_warp, build_label_map, register_to_template, warp_atlases
 from src.registration.device import resolve_device
 
+#: Registration scratch for one subject is ~1-2 GB; below this much free
+#: space under $TMPDIR the app uses output_dir/tmp instead.
+MIN_SCRATCH_FREE_BYTES = 4 * 2**30
+
 #: joint_label_fusion settings for --method fusion. Why max_lab_plus_one and
 #: usecor are what they are is explained at the call in segment_image. Kept
 #: here so validation harnesses fuse with exactly the production settings.
@@ -86,11 +90,15 @@ class ANTsSegmentation:
         #      Nothing read it before, so ~1-2 GB of warped-atlas scratch per
         #      subject went to the output tree instead (spec section 4 says
         #      every crossing goes through a file on TMPDIR);
-        #   3. output_dir/tmp, the previous behaviour, as a last resort.
+        #   3. output_dir/tmp, the previous behaviour, as a last resort, and
+        #      when $TMPDIR is read-only or too small (BABS's --writable-tmpfs);
+        #      see _usable_tmpdir_or_output_tree.
+        scratch_from_tmpdir = False
         if temp_dir:
             self.temp_dir = Path(temp_dir)
         elif os.environ.get('TMPDIR'):
             self.temp_dir = Path(os.environ['TMPDIR']) / 'ants-nidm'
+            scratch_from_tmpdir = True
         elif output_dir:
             self.temp_dir = Path(output_dir) / 'tmp'
         else:
@@ -175,6 +183,8 @@ class ANTsSegmentation:
         
         # Create necessary directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        if scratch_from_tmpdir:
+            self.temp_dir = self._usable_tmpdir_or_output_tree(self.temp_dir)
         if self.temp_dir:
             self.temp_dir.mkdir(parents=True, exist_ok=True)
             
@@ -199,6 +209,36 @@ class ANTsSegmentation:
         if not self.template_labels_path.exists():
             self.logger.warning(f"Template labels file not found: {self.template_labels_path}")
             
+    def _usable_tmpdir_or_output_tree(self, candidate):
+        """candidate (under $TMPDIR) if it is writable with room for a subject's
+        registration scratch, else output_dir/tmp.
+
+        In the image TMPDIR is /work. With a bind over it (run_container.sh,
+        the sbatch harnesses) that is real disk. Without one it is either
+        read-only (plain `apptainer run`) or, under --writable-tmpfs as BABS
+        runs it, an overlay capped by Apptainer's "sessiondir max size"
+        (64 MiB on ORCD), where the warps fail with ENOSPC mid-subject.
+        """
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(candidate).free
+        except OSError as e:
+            reason = f"not writable ({e})"
+        else:
+            if free >= MIN_SCRATCH_FREE_BYTES:
+                return candidate
+            reason = f"only {free / 2**30:.2f} GiB free"
+        fallback = self.output_dir / 'tmp'
+        self.logger.warning(f"TMPDIR scratch {candidate} is {reason}; using {fallback}. "
+                            f"Bind a writable directory over $TMPDIR to avoid this.")
+        # ants.joint_label_fusion writes its ~100 probability images with
+        # mktemp, and antsBrainExtraction.sh inherits TMPDIR, so move the
+        # process-wide temp root too, not only this class's scratch.
+        fallback.mkdir(parents=True, exist_ok=True)
+        os.environ['TMPDIR'] = str(fallback)
+        tempfile.tempdir = None
+        return fallback
+
     @contextmanager
     def _scratch(self, prefix):
         """A private scratch directory under temp_dir, removed on exit.

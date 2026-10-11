@@ -831,6 +831,40 @@ class TestANTsSegmentation(unittest.TestCase):
             "scratch must not land in the output tree, which BABS zips",
         )
 
+    def test_tmpdir_without_room_falls_back_to_the_output_tree(self):
+        """Under BABS's --writable-tmpfs, with nothing bound over /work,
+        TMPDIR is a 64 MiB overlay on this cluster and registration scratch
+        (1-2 GB) fails with ENOSPC partway through a subject."""
+        small = shutil._ntuple_diskusage(total=64 << 20, used=0, free=64 << 20)
+        with patch('src.antspy.wrapper.ANTsSegmentation._load_templates'), \
+             patch('src.antspy.wrapper.shutil.disk_usage', return_value=small), \
+             patch.dict(os.environ, {'TMPDIR': str(self.temp_dir / 'work')}):
+            try:
+                seg = ANTsSegmentation(bids_dir=str(self.bids_dir), output_dir=str(self.output_dir),
+                                       modality='T1w', device='cpu')
+                # ants.joint_label_fusion writes ~100 probability images with
+                # mktemp, so the process temp root has to move as well.
+                self.assertEqual(tempfile.gettempdir(), str(self.output_dir / 'tmp'))
+            finally:
+                tempfile.tempdir = None
+        self.assertEqual(seg.temp_dir, self.output_dir / 'tmp')
+
+    def test_unwritable_tmpdir_falls_back_to_the_output_tree(self):
+        """Plain `apptainer run` with no /work bind leaves /work read-only."""
+        ro = self.temp_dir / 'ro'
+        ro.mkdir()
+        ro.chmod(0o555)
+        try:
+            with patch('src.antspy.wrapper.ANTsSegmentation._load_templates'), \
+                 patch.dict(os.environ, {'TMPDIR': str(ro)}):
+                seg = ANTsSegmentation(bids_dir=str(self.bids_dir), output_dir=str(self.output_dir),
+                                       modality='T1w', device='cpu')
+                self.assertEqual(tempfile.gettempdir(), str(self.output_dir / 'tmp'))
+        finally:
+            ro.chmod(0o755)
+            tempfile.tempdir = None
+        self.assertEqual(seg.temp_dir, self.output_dir / 'tmp')
+
     def test_explicit_temp_dir_beats_tmpdir(self):
         """A caller who passes temp_dir means it."""
         with patch('src.antspy.wrapper.ANTsSegmentation._load_templates'), \
