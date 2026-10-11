@@ -285,6 +285,11 @@ Output files include:
   compared against the delivered ANTs derivative, with volume-stratified Dice
   and volume thresholds. The comparison runs inside the container, because it
   needs FireANTs' own `scripts/evalutils.py`.
+- `scripts/freesurfer_agreement.py <app_out> --subject <id>` -- report only:
+  Dice and volume ratio of the delivered dseg against FreeSurfer's
+  `aparc.DKTatlas+aseg`, and BVOL against FreeSurfer's BrainSegVol. FreeSurfer
+  uses a different protocol, so this is a check on real scans, not a pass
+  criterion.
 
 ## NIDM Outputs
 
