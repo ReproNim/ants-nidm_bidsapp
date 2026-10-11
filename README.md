@@ -306,8 +306,8 @@ The app generates NIDM-compatible outputs that can be used with NIDM tools for v
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request. The
-[developer guide](docs/development.md) covers the code layout, the
+Contributions are welcome! Please feel free to submit a Pull Request. 
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the code layout, the
 ANTsPy/FireANTs boundary and how to test a change.
 
 ## License

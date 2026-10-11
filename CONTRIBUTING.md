@@ -1,7 +1,7 @@
-# Developer guide
+# Contributing
 
 How the code is organised, what each tool is responsible for, and how to test
-a change. User-facing instructions are in the [README](../README.md).
+a change. User-facing instructions are in the [README](README.md).
 
 ## Code layout
 
