@@ -7,12 +7,11 @@
 # build time: TORCH_CUDA_ARCH_LIST in the %post names the targets explicitly.
 #
 # Usage:
-#   sbatch scripts/build_sif.sbatch [out.sif]
-# Default output: ~/simple2_bidsapp_babs/ants-nidm_bidsapp_fireants.sif
-# (never the canonical ants-nidm_bidsapp.sif -- that is the ANTs build that
-# produced the delivered Caltech derivative).
+#   sbatch -p <partition> scripts/build_sif.sbatch <out.sif>
+# Name the output by version (e.g. ants-nidm_bidsapp-0.2.0.sif) so it never
+# overwrites an image that produced a delivered derivative.
+# No partition is set here: pass one with `sbatch -p <partition>`.
 #SBATCH --job-name=ants-fireants-sifbuild
-#SBATCH --partition=mit_normal
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
@@ -24,7 +23,7 @@ set -euo pipefail
 # repo is located from the submit directory (run `sbatch` from the repo root).
 REPO="${REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 test -f "$REPO/Singularity" || { echo "no Singularity in $REPO; sbatch from the repo root" >&2; exit 2; }
-OUT="${1:-$HOME/simple2_bidsapp_babs/ants-nidm_bidsapp_fireants.sif}"
+OUT="${1:?usage: sbatch -p <partition> scripts/build_sif.sbatch <out.sif>}"
 set -a; [[ -f .env ]] && . ./.env; set +a   # paths live in the gitignored .env
 SCRATCH="${SCRATCH:?set SCRATCH in .env to a large scratch directory}"
 
@@ -32,7 +31,7 @@ SCRATCH="${SCRATCH:?set SCRATCH in .env to a large scratch directory}"
 # usage.apptainer.version: 1.5.2-1.el8, so this is the version known to get
 # through this %post rootless (1.1.9 died at apt's privilege drop).
 module load apptainer/1.5.2
-# The ORCD module exports APPTAINER_BINDPATH=/orcd,/nfs, which breaks
+# Some site modules export an APPTAINER_BINDPATH (e.g. a site-wide /nfs), which breaks
 # `apptainer build` ("mount /nfs destination doesn't exist").
 unset APPTAINER_BINDPATH
 export APPTAINER_TMPDIR="${SCRATCH}/apptainer_tmp"

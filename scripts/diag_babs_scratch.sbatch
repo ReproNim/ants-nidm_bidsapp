@@ -11,8 +11,8 @@
 #       [<session>] [<nidm_input_dir>]
 # A session is passed the way BABS passes it: positional level `participant`
 # plus --session-label. A NIDM input dir is bound read-only at /nidm.
+# No partition is set here: pass one with `sbatch -p <partition>`.
 #SBATCH --job-name=ants-babs-scratch
-#SBATCH --partition=ou_bcs_high
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G

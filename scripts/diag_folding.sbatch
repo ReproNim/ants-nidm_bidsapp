@@ -4,8 +4,8 @@
 # rebuilding the SIF (the installed `ants-nidm` package is an editable install
 # of /opt/src, so the bind is what python imports).
 # Usage: sbatch scripts/diag_folding.sbatch <sif> <out_dir> [participant]
+# No partition is set here: pass one with `sbatch -p <partition>`.
 #SBATCH --job-name=ants-fireants-diag-folding
-#SBATCH --partition=pi_satra
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=96G
