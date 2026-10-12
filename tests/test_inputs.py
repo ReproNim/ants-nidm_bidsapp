@@ -138,3 +138,40 @@ def test_unreadable_header_is_still_chosen_when_alone(tmp_path):
     choice = choose_anat_input(tmp_path, "01", max_voxel_size=2.0)
     assert choice.chosen.name == "sub-01_T1w.nii.gz"
     assert choice.too_coarse == []
+
+
+def test_recorded_input_is_read_from_the_dseg_sidecar(tmp_path):
+    """--skip-ants names the image the existing segmentation recorded, even
+    when the current rule would now choose another one."""
+    import json
+
+    from src.antspy.inputs import recorded_anat_input
+
+    bids = tmp_path / "bids"
+    _touch(bids / "sub-01" / "ses-1" / "anat",
+           "sub-01_ses-1_T1w.nii.gz", "sub-01_ses-1_acq-hires_T1w.nii.gz")
+    subject_dir = tmp_path / "out" / "sub-01" / "ses-1"
+    (subject_dir / "anat").mkdir(parents=True)
+    (subject_dir / "anat" / "sub-01_ses-1_space-orig_dseg.json").write_text(json.dumps(
+        {"Sources": ["bids:raw:sub-01/ses-1/anat/sub-01_ses-1_acq-hires_T1w.nii.gz"]}))
+
+    choice = recorded_anat_input(subject_dir, bids)
+    assert choice.chosen == bids / "sub-01/ses-1/anat/sub-01_ses-1_acq-hires_T1w.nii.gz"
+    assert choice.not_used == [] and choice.too_coarse == []
+
+
+@pytest.mark.parametrize("content", [None, "{}", '{"Sources": ["bids:other:x"]}', "not json"])
+def test_recorded_input_is_none_without_a_usable_sources_entry(tmp_path, content):
+    from src.antspy.inputs import recorded_anat_input
+
+    subject_dir = tmp_path / "sub-01"
+    (subject_dir / "anat").mkdir(parents=True)
+    if content is not None:
+        (subject_dir / "anat" / "sub-01_space-orig_dseg.json").write_text(content)
+    assert recorded_anat_input(subject_dir, tmp_path) is None
+
+
+def test_bids_relative_without_a_bids_dir_gives_the_name():
+    from src.antspy.inputs import bids_relative
+
+    assert bids_relative("/data/sub-01/anat/sub-01_T1w.nii.gz", None) == "sub-01_T1w.nii.gz"
