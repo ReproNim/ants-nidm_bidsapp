@@ -14,7 +14,9 @@ segmented per subject/session, chosen by:
 Images coarser than ``max_voxel_size`` in any dimension are skipped and the
 next one in that order is used; if none is fine enough, nothing is chosen and
 the subject fails. ABIDE II UCLA_Long's ``acq-hires`` T1w, for example, is
-1.5 x 1.5 x 4 mm, too coarse for a cortical parcellation.
+1.5 x 1.5 x 4 mm, too coarse for a cortical parcellation. An image whose
+header cannot be read ranks after every readable one, so it is used only when
+nothing else is left (and then fails when loaded).
 
 Every caller that needs the input path uses this, so segmentation and the
 recorded provenance name the same file. The choice and every skipped
@@ -79,25 +81,27 @@ def choose_anat_input(bids_dir, subject, session=None, suffix="T1w",
                       max_voxel_size=None, logger=None):
     """Pick the image to segment; see the module docstring for the order."""
     ranked = rank_anat_inputs(bids_dir, subject, session, suffix)
-    fine, too_coarse = [], []
+    fine, unreadable, too_coarse = [], [], []
     for path in ranked:
         if max_voxel_size is not None:
             try:
                 zooms = voxel_size(path)
             except Exception:
-                # Unreadable header: not this check's call; loading it fails
-                # loudly later.
-                zooms = (0.0,)
+                unreadable.append(path)
+                continue
             if max(zooms) > max_voxel_size:
                 too_coarse.append((path, zooms))
                 continue
         fine.append(path)
+    fine += unreadable
     choice = AnatChoice(fine[0] if fine else None, fine[1:], too_coarse)
     if logger is not None:
         if choice.chosen is not None:
             logger.info(f"{suffix} input: {choice.chosen.name}")
         for path in choice.not_used:
             logger.info(f"  not used: {path.name}")
+        for path in unreadable:
+            logger.warning(f"  header unreadable, ranked last: {path.name}")
         for path, zooms in too_coarse:
             logger.warning(f"  not used, voxels {zooms} mm exceed {max_voxel_size} mm: {path.name}")
     return choice

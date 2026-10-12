@@ -119,3 +119,22 @@ def test_choose_without_limit_keeps_rank_order(tmp_path):
     assert choice.chosen.name == "sub-01_T1w.nii.gz"
     assert [p.name for p in choice.not_used] == ["sub-01_acq-hires_T1w.nii.gz"]
     assert choice.too_coarse == []
+
+
+def test_unreadable_header_ranks_after_readable_images(tmp_path):
+    # A corrupt best-ranked file must not shadow a usable run-2 image.
+    anat = tmp_path / "sub-01" / "anat"
+    _touch(anat, "sub-01_T1w.nii.gz")
+    _nifti(anat / "sub-01_run-2_T1w.nii.gz", (1.0, 1.0, 1.0))
+    choice = choose_anat_input(tmp_path, "01", max_voxel_size=2.0)
+    assert choice.chosen.name == "sub-01_run-2_T1w.nii.gz"
+    assert [p.name for p in choice.not_used] == ["sub-01_T1w.nii.gz"]
+
+
+def test_unreadable_header_is_still_chosen_when_alone(tmp_path):
+    # With nothing else, it is chosen so that loading it fails loudly.
+    anat = tmp_path / "sub-01" / "anat"
+    _touch(anat, "sub-01_T1w.nii.gz")
+    choice = choose_anat_input(tmp_path, "01", max_voxel_size=2.0)
+    assert choice.chosen.name == "sub-01_T1w.nii.gz"
+    assert choice.too_coarse == []
