@@ -114,7 +114,34 @@ def select_anat_input(bids_dir, subject, session=None, suffix="T1w", logger=None
 
 def bids_relative(path, bids_dir):
     """``path`` relative to the BIDS root as a POSIX string, else its name."""
+    if bids_dir is None:
+        return Path(path).name
     try:
         return Path(path).relative_to(Path(bids_dir)).as_posix()
     except ValueError:
         return Path(path).name
+
+
+def recorded_anat_input(subject_dir, bids_dir):
+    """The input a finished segmentation recorded, as an AnatChoice, or None.
+
+    save_results writes the segmented image into the dseg sidecar as a BIDS
+    ``Sources`` entry (``bids:raw:<path relative to the BIDS root>``). Reading
+    it back lets a run that skips segmentation name the image that was
+    actually segmented, instead of choosing again under the current rule.
+    Returns None when there is no sidecar or it has no such entry, which is
+    the case for derivatives written before the sidecar existed.
+    """
+    import json
+
+    anat_dir = Path(subject_dir) / "anat"
+    sidecars = sorted(anat_dir.glob("*_dseg.json")) if anat_dir.is_dir() else []
+    for sidecar in sidecars:
+        try:
+            sources = json.loads(sidecar.read_text()).get("Sources", [])
+        except (OSError, ValueError, AttributeError):
+            continue
+        for source in sources:
+            if isinstance(source, str) and source.startswith("bids:raw:"):
+                return AnatChoice(Path(bids_dir) / source[len("bids:raw:"):], [], [])
+    return None

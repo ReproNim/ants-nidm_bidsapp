@@ -161,6 +161,9 @@ class ANTsSegmentation:
         self.max_voxel_size = max_voxel_size
         # Why the last run_subject call failed, for processing_summary.json.
         self.last_failure_reason = None
+        # The AnatChoice made by the last run_subject, so callers record the
+        # image that was segmented instead of choosing again.
+        self.last_choice = None
         self.verbose = verbose
 
         # ANTsPy takes no threads argument: every ITK filter it calls reads
@@ -744,11 +747,13 @@ class ANTsSegmentation:
                 bids_session = None
                 
             self.last_failure_reason = None
+            self.last_choice = None
             # Find input image (run-/acq- entities allowed; see inputs.py)
             choice = choose_anat_input(self.bids_dir, bids_subject, bids_session,
                                        suffix=self.modality,
                                        max_voxel_size=self.max_voxel_size,
                                        logger=self.logger)
+            self.last_choice = choice
             input_file = choice.chosen
             if input_file is None and choice.too_coarse:
                 self.last_failure_reason = (
@@ -842,8 +847,9 @@ class ANTsSegmentation:
                 "ship the ANTs binaries (see Singularity/Dockerfile); ANTsPy "
                 "alone does not include them.")
 
-        abe_dir = Path(tempfile.mkdtemp(prefix='abe_', dir=str(self.temp_dir) if self.temp_dir else None))
-        try:
+        # The extracted-brain intermediate is large; _scratch removes it once
+        # the mask has been read back into memory.
+        with self._scratch('abe_') as abe_dir:
             abe_input = abe_dir / 'n4.nii.gz'
             ants.image_write(n4_image, str(abe_input))
             abe_prefix = str(abe_dir / 'abe_')
@@ -871,10 +877,6 @@ class ANTsSegmentation:
                     f"stdout: {proc.stdout[-2000:]} stderr: {proc.stderr[-2000:]}")
 
             final_mask = ants.image_read(str(mask_path))
-        finally:
-            # The extracted-brain intermediate is large; keep only what was
-            # read back into memory.
-            shutil.rmtree(abe_dir, ignore_errors=True)
 
         # BrainExtractionMask is the canonical script's product, untouched: its
         # Atropos refinement and morphology already finalized it.

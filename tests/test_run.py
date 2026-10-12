@@ -309,6 +309,7 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = None
                 self.modality = "T1w"
+                self.max_voxel_size = 2.0
                 self.method = "quick"
                 self.skip_nidm = False
                 self.skip_ants = False
@@ -444,6 +445,7 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = None
                 self.modality = "T1w"
+                self.max_voxel_size = 2.0
                 self.method = "fusion"
                 self.skip_nidm = False
                 self.skip_ants = False
@@ -485,6 +487,7 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "99"
                 self.session_label = None
                 self.modality = "T1w"
+                self.max_voxel_size = 2.0
                 self.method = "fusion"
                 self.skip_nidm = False
                 self.skip_ants = False
@@ -524,6 +527,7 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = None
                 self.modality = "T1w"
+                self.max_voxel_size = 2.0
                 self.method = "fusion"
                 self.skip_nidm = False
                 self.skip_ants = True
@@ -571,6 +575,7 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = None
                 self.modality = "T1w"
+                self.max_voxel_size = 2.0
                 self.method = "fusion"
                 self.skip_nidm = True
                 self.skip_ants = False
@@ -616,6 +621,7 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = "01"
                 self.modality = "T1w"
+                self.max_voxel_size = 2.0
                 self.method = "quick"
                 self.skip_nidm = False
                 self.skip_ants = False
@@ -936,6 +942,52 @@ class TestRun(unittest.TestCase):
         argv = ["ants-nidm", "/bids", "/out", "participant", "--prob-threshold", "0.3"]
         with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
             parse_arguments()
+
+    def test_anat_choice_reuses_the_segmenters_choice(self):
+        """The recorded input is the one segmented, not a second choice."""
+        from types import SimpleNamespace
+
+        from src.run import resolve_anat_choice
+
+        made = AnatChoice(Path("/bids/sub-01/anat/sub-01_T1w.nii.gz"), [], [])
+        segmenter = SimpleNamespace(last_choice=made)
+        args = SimpleNamespace(skip_ants=False, bids_dir="/bids", modality="T1w",
+                               max_voxel_size=2.0)
+        with patch("src.run.choose_anat_input", side_effect=AssertionError("chose again")):
+            got = resolve_anat_choice(args, segmenter, "/out", "01", None,
+                                      logging.getLogger("t"))
+        self.assertIs(got, made)
+
+    def test_skip_ants_records_the_input_from_the_sidecar(self):
+        from types import SimpleNamespace
+
+        from src.run import resolve_anat_choice
+
+        out = Path(self.temp_dir) / "derivs"
+        anat = out / "sub-01" / "ses-1" / "anat"
+        anat.mkdir(parents=True)
+        (anat / "sub-01_ses-1_space-orig_dseg.json").write_text(json.dumps(
+            {"Sources": ["bids:raw:sub-01/ses-1/anat/sub-01_ses-1_run-2_T1w.nii.gz"]}))
+        args = SimpleNamespace(skip_ants=True, bids_dir="/bids", modality="T1w",
+                               max_voxel_size=2.0)
+        with patch("src.run.choose_anat_input", side_effect=AssertionError("chose again")):
+            got = resolve_anat_choice(args, None, out, "01", "1", logging.getLogger("t"))
+        self.assertEqual(got.chosen, Path("/bids/sub-01/ses-1/anat/sub-01_ses-1_run-2_T1w.nii.gz"))
+
+    def test_skip_ants_without_a_recorded_input_chooses_again_and_warns(self):
+        from types import SimpleNamespace
+
+        from src.run import resolve_anat_choice
+
+        fresh = AnatChoice(None, [], [])
+        args = SimpleNamespace(skip_ants=True, bids_dir="/bids", modality="T1w",
+                               max_voxel_size=2.0)
+        with patch("src.run.choose_anat_input", return_value=fresh) as choose, \
+                self.assertLogs("t", level="WARNING"):
+            got = resolve_anat_choice(args, None, Path(self.temp_dir), "01", None,
+                                      logging.getLogger("t"))
+        self.assertIs(got, fresh)
+        choose.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()

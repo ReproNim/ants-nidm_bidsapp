@@ -15,7 +15,13 @@ import ants
 
 # Import local modules
 from src.antspy.wrapper import ANTsSegmentation
-from src.antspy.inputs import DEFAULT_MAX_VOXEL_SIZE, bids_relative, choose_anat_input
+from src.antspy.inputs import (
+    DEFAULT_MAX_VOXEL_SIZE,
+    AnatChoice,
+    bids_relative,
+    choose_anat_input,
+    recorded_anat_input,
+)
 
 # Version of the BIDS *specification* these derivatives claim conformance to.
 # Must never be derived from a library version: pkg_resources.get_distribution
@@ -142,6 +148,32 @@ def get_version_info(app_version):
 def _failure_reason(segmenter):
     reason = getattr(segmenter, 'last_failure_reason', None)
     return reason if isinstance(reason, str) else None
+
+
+def resolve_anat_choice(args, segmenter, derivatives_dir, bids_subject, bids_session, logger):
+    """The input image to record for this subject/session.
+
+    After segmentation, the segmenter's own choice: choosing again would agree
+    only because the rule is deterministic. With --skip-ants, the input the
+    existing segmentation recorded in its dseg sidecar, since the current rule
+    or --max-voxel-size may pick a different image than the one segmented.
+    Only when neither is available is the image chosen afresh.
+    """
+    choice = getattr(segmenter, 'last_choice', None)
+    if isinstance(choice, AnatChoice):
+        return choice
+    if args.skip_ants:
+        subject_dir = subject_output_dir(derivatives_dir, bids_subject, bids_session)
+        choice = recorded_anat_input(subject_dir, args.bids_dir)
+        if choice is not None:
+            logger.info(f"Input recorded by the existing segmentation: {choice.chosen.name}")
+            return choice
+        logger.warning(
+            "The existing segmentation does not record its input (no Sources in "
+            "its dseg sidecar); choosing it again, which may name a different "
+            "image than the one segmented")
+    return choose_anat_input(args.bids_dir, bids_subject, bids_session,
+                             suffix=args.modality, max_voxel_size=args.max_voxel_size)
 
 
 def save_processing_summary(logger, subject_dir, bids_subject, bids_session,
@@ -350,7 +382,7 @@ def initialize(args):
             device=args.device,
             fireants_batch_size=args.fireants_batch_size,
             label_interpolation=args.label_interpolation,
-            max_voxel_size=getattr(args, 'max_voxel_size', DEFAULT_MAX_VOXEL_SIZE),
+            max_voxel_size=args.max_voxel_size,
         )
 
     return layout, segmenter, derivatives_dir, nidm_input_dir
@@ -548,9 +580,8 @@ def process_participant(args, logger):
             success = False
             logger.error(f"Segmentation failed for subject {participant_label}")
     
-    anat_choice = choose_anat_input(args.bids_dir, bids_subject, bids_session,
-                                    suffix=args.modality,
-                                    max_voxel_size=getattr(args, 'max_voxel_size', DEFAULT_MAX_VOXEL_SIZE))
+    anat_choice = resolve_anat_choice(args, segmenter, derivatives_dir,
+                                      bids_subject, bids_session, logger)
     input_file = anat_choice.chosen
 
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)
@@ -651,9 +682,8 @@ def process_session(args, logger):
             success = False
             logger.error(f"Segmentation failed for session {session_label}")
     
-    anat_choice = choose_anat_input(args.bids_dir, bids_subject, bids_session,
-                                    suffix=args.modality,
-                                    max_voxel_size=getattr(args, 'max_voxel_size', DEFAULT_MAX_VOXEL_SIZE))
+    anat_choice = resolve_anat_choice(args, segmenter, derivatives_dir,
+                                      bids_subject, bids_session, logger)
     input_file = anat_choice.chosen
 
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)

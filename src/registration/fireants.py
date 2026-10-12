@@ -282,6 +282,48 @@ def _chunks(items, size):
     return [list(items[i : i + size]) for i in range(0, len(items), size)]
 
 
+def _deformable_registration(fixed_batch, moving_batch, affine):
+    """The deformable stage, initialised from ``affine``.
+
+    warp_atlases (--method fusion) and register_to_template (--method quick)
+    both build it here, so the two methods cannot drift apart in their
+    deformable settings.
+    """
+    if DEFORMABLE == "greedy":
+        from fireants.registration.greedy import GreedyRegistration
+        return GreedyRegistration(
+            GREEDY_SCALES,
+            GREEDY_ITERATIONS,
+            fixed_batch,
+            moving_batch,
+            deformation_type="compositive",
+            optimizer="Adam",
+            optimizer_lr=GREEDY_LR,
+            cc_kernel_size=GREEDY_CC_KERNEL_SIZE,
+            smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
+            smooth_warp_sigma=SMOOTH_WARP_SIGMA,
+            init_affine=affine.get_affine_matrix().detach(),
+            **_loss_kwargs(),
+        )
+    if DEFORMABLE == "syn":
+        from fireants.registration.syn import SyNRegistration
+        return SyNRegistration(
+            SYN_SCALES,
+            SYN_ITERATIONS,
+            fixed_batch,
+            moving_batch,
+            deformation_type="compositive",
+            optimizer="Adam",
+            optimizer_lr=SYN_LR,
+            cc_kernel_size=CC_KERNEL_SIZE,
+            smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
+            smooth_warp_sigma=SMOOTH_WARP_SIGMA,
+            init_affine=affine.get_affine_matrix().detach(),
+            **_loss_kwargs(),
+        )
+    raise ValueError(f"DEFORMABLE must be 'syn' or 'greedy', got {DEFORMABLE!r}")
+
+
 def warp_atlases(
     target,
     target_mask,
@@ -308,7 +350,6 @@ def warp_atlases(
     from fireants.interpolator import fireants_interpolator
     from fireants.io import BatchedImages, Image
     from fireants.registration.affine import AffineRegistration
-    from fireants.registration.syn import SyNRegistration
 
     log = logger or logging.getLogger("ants-nidm.registration")
     atlas_paths = [Path(p) for p in atlas_paths]
@@ -406,42 +447,8 @@ def warp_atlases(
         )
         affine.optimize()
 
-        if DEFORMABLE == "greedy":
-            from fireants.registration.greedy import GreedyRegistration
-
-            log.info("Registering %d atlases (Greedy)", len(chunk))
-            syn = GreedyRegistration(
-                GREEDY_SCALES,
-                GREEDY_ITERATIONS,
-                fixed_batch,
-                moving_batch,
-                deformation_type="compositive",
-                optimizer="Adam",
-                optimizer_lr=GREEDY_LR,
-                cc_kernel_size=GREEDY_CC_KERNEL_SIZE,
-                smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
-                smooth_warp_sigma=SMOOTH_WARP_SIGMA,
-                init_affine=affine.get_affine_matrix().detach(),
-                **_loss_kwargs(),
-            )
-        elif DEFORMABLE == "syn":
-            log.info("Registering %d atlases (SyN)", len(chunk))
-            syn = SyNRegistration(
-                SYN_SCALES,
-                SYN_ITERATIONS,
-                fixed_batch,
-                moving_batch,
-                deformation_type="compositive",
-                optimizer="Adam",
-                optimizer_lr=SYN_LR,
-                cc_kernel_size=CC_KERNEL_SIZE,
-                smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
-                smooth_warp_sigma=SMOOTH_WARP_SIGMA,
-                init_affine=affine.get_affine_matrix().detach(),
-                **_loss_kwargs(),
-            )
-        else:
-            raise ValueError(f"DEFORMABLE must be 'syn' or 'greedy', got {DEFORMABLE!r}")
+        log.info("Registering %d atlases (%s)", len(chunk), DEFORMABLE)
+        syn = _deformable_registration(fixed_batch, moving_batch, affine)
         syn.optimize()
 
         # [N, C, ...]; with the masked loss C == 2 and channel 1 is the mask.
@@ -628,7 +635,6 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     """
     from fireants.io import BatchedImages, Image
     from fireants.registration.affine import AffineRegistration
-    from fireants.registration.syn import SyNRegistration
 
     log = logger or logging.getLogger("ants-nidm.registration")
     temp_dir = Path(temp_dir)
@@ -679,42 +685,8 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     )
     affine.optimize()
 
-    if DEFORMABLE == "greedy":
-        from fireants.registration.greedy import GreedyRegistration
-
-        log.info("Template registration (Greedy)")
-        syn = GreedyRegistration(
-            GREEDY_SCALES,
-            GREEDY_ITERATIONS,
-            fixed_batch,
-            moving_batch,
-            deformation_type="compositive",
-            optimizer="Adam",
-            optimizer_lr=GREEDY_LR,
-            cc_kernel_size=GREEDY_CC_KERNEL_SIZE,
-            smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
-            smooth_warp_sigma=SMOOTH_WARP_SIGMA,
-            init_affine=affine.get_affine_matrix().detach(),
-            **_loss_kwargs(),
-        )
-    elif DEFORMABLE == "syn":
-        log.info("Template registration (SyN)")
-        syn = SyNRegistration(
-            SYN_SCALES,
-            SYN_ITERATIONS,
-            fixed_batch,
-            moving_batch,
-            deformation_type="compositive",
-            optimizer="Adam",
-            optimizer_lr=SYN_LR,
-            cc_kernel_size=CC_KERNEL_SIZE,
-            smooth_grad_sigma=SMOOTH_GRAD_SIGMA,
-            smooth_warp_sigma=SMOOTH_WARP_SIGMA,
-            init_affine=affine.get_affine_matrix().detach(),
-            **_loss_kwargs(),
-        )
-    else:
-        raise ValueError(f"DEFORMABLE must be 'syn' or 'greedy', got {DEFORMABLE!r}")
+    log.info("Template registration (%s)", DEFORMABLE)
+    syn = _deformable_registration(fixed_batch, moving_batch, affine)
     syn.optimize()
     # --method quick pulls the template labels through this warp, so the
     # atlas gate applies here too.
