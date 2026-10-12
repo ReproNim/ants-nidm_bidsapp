@@ -16,6 +16,7 @@ from natsort import natsorted
 
 from src.registration import apply_warp, build_label_map, register_to_template, warp_atlases
 from src.registration.device import resolve_device
+from src.antspy.inputs import select_anat_input
 
 #: Registration scratch for one subject is ~1-2 GB; below this much free
 #: space under $TMPDIR the app uses output_dir/tmp instead.
@@ -735,21 +736,12 @@ class ANTsSegmentation:
             else:
                 bids_session = None
                 
-            # Construct path to input image
-            if bids_session:
-                bids_path = self.bids_dir / f"sub-{bids_subject}" / f"ses-{bids_session}" / "anat"
-                img_pattern = f"sub-{bids_subject}_ses-{bids_session}_{self.modality}.nii.gz"
-            else:
-                bids_path = self.bids_dir / f"sub-{bids_subject}" / "anat"
-                img_pattern = f"sub-{bids_subject}_{self.modality}.nii.gz"
-            
-            # Find input image
-            input_file = list(bids_path.glob(img_pattern))
-            if not input_file:
+            # Find input image (run-/acq- entities allowed; see inputs.py)
+            input_file = select_anat_input(self.bids_dir, bids_subject, bids_session,
+                                           suffix=self.modality, logger=self.logger)
+            if input_file is None:
                 self.logger.error(f"No {self.modality} image found for subject {subject_id}")
                 return False
-            
-            input_file = input_file[0]
             self.logger.info(f"Processing {input_file}")
             
             # Load image using helper to centralize error handling (and simplify testing)

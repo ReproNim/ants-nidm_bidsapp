@@ -15,6 +15,7 @@ import ants
 
 # Import local modules
 from src.antspy.wrapper import ANTsSegmentation
+from src.antspy.inputs import select_anat_input
 
 # Version of the BIDS *specification* these derivatives claim conformance to.
 # Must never be derived from a library version: pkg_resources.get_distribution
@@ -534,8 +535,7 @@ def process_participant(args, logger):
             logger.info(f"Found NIDM input file: {nidm_input_file}")
 
         # Get input file path for NIDM conversion (single session)
-        input_path = layout.get(subject=bids_subject, suffix=args.modality, extension='nii.gz')
-        input_file = input_path[0].path if input_path else None
+        input_file = select_anat_input(args.bids_dir, bids_subject, suffix=args.modality)
 
         success = nidm_conversion(
             logger=logger,
@@ -633,8 +633,8 @@ def process_session(args, logger):
             logger.info(f"Found NIDM input file: {nidm_input_file}")
 
         # Get input file path for NIDM conversion
-        input_path = layout.get(subject=bids_subject, session=bids_session, suffix=args.modality, extension='nii.gz')
-        input_file = input_path[0].path if input_path else None
+        input_file = select_anat_input(args.bids_dir, bids_subject, bids_session,
+                                       suffix=args.modality)
 
         success = nidm_conversion(
             logger=logger,

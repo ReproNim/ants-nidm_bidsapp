@@ -525,6 +525,27 @@ class TestANTsSegmentation(unittest.TestCase):
             mock_segment.assert_called_once()
             mock_save.assert_called_once()
 
+    def test_run_subject_session_with_run_entity(self):
+        """ABIDE II longitudinal names (sub-X_ses-N_run-1_T1w) must be found,
+        and the standard acquisition chosen over acq-hires."""
+        anat = self.bids_dir / "sub-51209" / "ses-1" / "anat"
+        anat.mkdir(parents=True, exist_ok=True)
+        (anat / "sub-51209_ses-1_acq-hires_run-1_T1w.nii.gz").write_text("x")
+        (anat / "sub-51209_ses-1_run-1_T1w.nii.gz").write_text("x")
+
+        with patch('ants.image_read') as mock_read, \
+             patch.object(self.segmenter, 'segment_image') as mock_segment, \
+             patch.object(self.segmenter, 'save_results') as mock_save:
+            mock_read.return_value = MagicMock()
+            mock_segment.return_value = {'segmentation': MagicMock(), 'probabilityimages': []}
+            mock_save.return_value = {}
+
+            self.assertTrue(self.segmenter.run_subject("sub-51209", "ses-1"))
+            self.assertEqual(Path(mock_read.call_args[0][0]).name,
+                             "sub-51209_ses-1_run-1_T1w.nii.gz")
+            self.assertEqual(Path(mock_save.call_args.kwargs['input_t1w']).name,
+                             "sub-51209_ses-1_run-1_T1w.nii.gz")
+
     def test_fusion_delegates_registration_to_warp_atlases(self):
         """The twenty-atlas ants.registration loop is gone; segment_image calls
         warp_atlases once and passes its output straight to joint_label_fusion.
