@@ -1,7 +1,27 @@
-FROM ubuntu:22.04
+# CUDA *devel* base, not plain ubuntu:22.04. FireANTs' fused_ops extension is
+# built from source below, and fused_ops/setup.py uses
+# torch.utils.cpp_extension.CUDAExtension over nine .cu sources. CUDAExtension()
+# calls library_paths(cuda=True) -> _join_cuda_home(...), which raises
+# `EnvironmentError: CUDA_HOME environment variable is not set` the moment nvcc
+# is absent -- so on ubuntu:22.04 the build died at `setup.py build_ext`, before
+# the `import fireants_fused_ops` assertion could ever run. The tag matches the
+# cu121 torch wheel installed below; torch only hard-fails on a CUDA *major*
+# mismatch (torch/utils/cpp_extension.py:_check_cuda_version), so 12.1 toolchain
+# + any cu12x wheel is fine.
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
 # Set non-interactive frontend for apt-get
 ENV DEBIAN_FRONTEND=noninteractive
+
+# The CUDA base image ships nvcc but no Python, so python3/python3-pip are
+# installed by the apt step below and every later `python3`/`pip3` invocation
+# depends on that. Do not drop them.
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=/usr/local/cuda/bin:$PATH
+# The build host has no GPU, so nvcc cannot autodetect an architecture and
+# torch falls back to compiling for whatever it guesses. Name the deployment
+# targets explicitly: A100 (sm_80) and H100 (sm_90) on pi_satra.
+ENV TORCH_CUDA_ARCH_LIST="8.0;9.0"
 
 # Install system dependencies
 RUN apt-get update && \
@@ -31,6 +51,29 @@ RUN pip3 install --no-cache-dir \
     pybids \
     nipype \
     antspyx
+
+# CUDA torch + FireANTs. Registration is GPU-only.
+RUN pip3 install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        "torch==2.5.1+cu121" && \
+    pip3 install --no-cache-dir fireants==1.5.0 "SimpleITK>=2.2.1"
+
+# The fused CUDA ops are NOT included by `pip install fireants` and must be
+# built from source. Without them FireANTs does not fail -- it forces
+# is_onehot=True (fireants/io/image.py:145-147) and silently returns a one-hot
+# volume costing 97x the memory. Assert the extension imports so a broken build
+# is caught here rather than in a BABS array.
+RUN git clone --depth 1 --branch v1.5.0 https://github.com/rohitrango/FireANTs.git /tmp/fireants-src && \
+    cd /tmp/fireants-src/fused_ops && \
+    python3 setup.py build_ext && \
+    python3 setup.py install && \
+    cd / && rm -rf /tmp/fireants-src && \
+    python3 -c "import torch, fireants_fused_ops; print('fused ops OK')"
+
+# Retry the downloads below. OSF answers with an occasional 5xx, and one
+# failed request otherwise fails the whole build (wget exit 8).
+RUN printf '%s\n' 'tries = 5' 'waitretry = 30' 'retry_connrefused = on' \
+        'retry_on_http_error = 429,500,502,503,504' >> /etc/wgetrc
 
 # Canonical ANTs binaries, pinned release. The wrapper shells out to
 # antsBrainExtraction.sh (the published extraction method the OASIS-30

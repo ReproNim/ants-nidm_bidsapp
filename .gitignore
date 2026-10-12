@@ -188,3 +188,9 @@ internal/
 
 # serena MCP server project cache
 .serena/
+
+# SDD execution workspace (ledger, briefs, review packages)
+.superpowers/
+
+# Plans, specs and analysis results are kept outside the repository
+docs/superpowers/

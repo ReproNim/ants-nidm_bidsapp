@@ -1,0 +1,10 @@
+# CPU-only torch for CI. The container installs the CUDA build instead; see
+# Dockerfile / Singularity. Kept separate so CI does not pull ~5 GB of nvidia
+# wheels for tests that run on 16^3 volumes.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.3.0
+# fireants==1.5.1 was specified in the design spec but does not exist on PyPI
+# (releases stop at 1.5.0 as of 2026-09-01; see task-4-report.md). Pinned to
+# the highest available release instead.
+fireants==1.5.0
+SimpleITK>=2.2.1

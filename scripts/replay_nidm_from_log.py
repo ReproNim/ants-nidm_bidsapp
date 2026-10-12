@@ -7,7 +7,7 @@ conversion against the referenced ANTs outputs using the locally checked-in
 ``ants_seg_to_nidm`` package.
 use  `micromamba activate nidm-test`
 Example usage:
-    python scripts/replay_nidm_from_log.py /orcd/scratch/bcs/001/yibei/simple2/ants_bidsapp_babs/study_abide_1030/ants_bidsapp_Caltech_1030/analysis/logs/ant.e5728235_3 --forcenidm
+    python scripts/replay_nidm_from_log.py <babs_project>/analysis/logs/ant.e<job>_<task> --forcenidm
 
 """
 

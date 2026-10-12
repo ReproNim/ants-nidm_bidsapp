@@ -1,30 +1,16 @@
-# Example Data
+# Examples
 
-This directory contains example data for testing and demonstration purposes.
+- `babs-ants-nidm-bids-study.yaml` -- a complete BABS configuration for this
+  app. See "Running under BABS" in the top-level README for the two settings
+  it cannot run without (`zip_foldernames` keyed by subject, and GPU flags).
+- `dataset_description.json` -- a minimal BIDS `dataset_description.json` to
+  copy when assembling a test dataset.
 
-## Directory Structure
-
-```
-examples/
-├── dataset_description.json
-├── sub-01/
-│   ├── anat/
-│   │   └── sub-01_T1w.nii.gz
-│   └── sub-01_scans.tsv
-└── sub-02/
-    ├── anat/
-    │   └── sub-02_T1w.nii.gz
-    └── sub-02_scans.tsv
-```
-
-## Usage
-
-To run the ANTs BIDS App on this example data:
+There is no sample imaging data here. To try the app, use any BIDS dataset
+with T1w images and run one subject:
 
 ```bash
-ants-nidm examples output participant --participant-label 01 02
+./run_container.sh ants-nidm_bidsapp.sif /path/to/bids /path/to/output 01
 ```
 
-## Note
-
-The example data files are placeholders and do not contain actual MRI data. For real usage, replace them with your own BIDS-formatted data. 
+`--participant-label` takes one subject per run; run subjects as separate jobs.

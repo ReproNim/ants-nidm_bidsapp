@@ -77,6 +77,7 @@ sys.modules['nibabel'] = MagicMock()
 sys.modules['bids'] = mock_bids
 
 # Import after mocking
+from src.antspy.inputs import AnatChoice
 from src.run import (process_participant, process_session, main, nidm_conversion,
                      create_dataset_description, subject_output_dir,
                      find_nidm_input_file, save_processing_summary,
@@ -209,6 +210,82 @@ class TestRun(unittest.TestCase):
             for path in paths:
                 self.assertTrue(os.path.exists(path))
 
+    def _run_conversion_capturing_cmd(self, method):
+        """Run nidm_conversion with subprocess mocked and return the argv it built."""
+        derivatives_dir = self.create_derivatives_structure()
+        subject_dir = os.path.join(derivatives_dir, "sub-01", "ses-01")
+        with patch('subprocess.run') as mock_run:
+            mock_process = MagicMock()
+            mock_process.returncode = 0
+            mock_process.stdout = "Success"
+            mock_process.stderr = ""
+
+            def write_nidm(*a, **kw):
+                with open(os.path.join(subject_dir, "nidm.ttl"), "w") as f:
+                    f.write("@prefix nidm: <http://purl.org/nidash/nidm#> .\n")
+                return mock_process
+            mock_run.side_effect = write_nidm
+
+            result = nidm_conversion(
+                self.logger, derivatives_dir, "01",
+                bids_session="01", verbose=False, method=method,
+            )
+        self.assertTrue(result)
+        mock_run.assert_called_once()
+        return mock_run.call_args[0][0]
+
+    def test_fusion_is_named_with_the_neuromorphometrics_protocol(self):
+        """fusion votes over the OASIS-TRT-20 DKT31_CMA atlases, whose
+        subcortical ids are Neuromorphometrics/BrainCOLOR. Naming them with the
+        FreeSurfer table is what put Left-Porg and Right-undetermined in
+        delivered NIDM, and reported the right thalamus as
+        Right-Substancia-Nigra."""
+        cmd = self._run_conversion_capturing_cmd("fusion")
+        self.assertIn("--label-protocol", cmd)
+        self.assertEqual(cmd[cmd.index("--label-protocol") + 1], "neuromorphometrics")
+
+    def test_quick_is_named_with_the_freesurfer_protocol(self):
+        """quick warps a template map already numbered in FreeSurfer aseg ids."""
+        cmd = self._run_conversion_capturing_cmd("quick")
+        self.assertIn("--label-protocol", cmd)
+        self.assertEqual(cmd[cmd.index("--label-protocol") + 1], "freesurfer")
+
+    def test_unknown_method_falls_back_without_the_flag(self):
+        """An unregistered method must not silently claim a protocol; it gets
+        the converter's own FreeSurfer default and a warning."""
+        cmd = self._run_conversion_capturing_cmd("some-future-method")
+        self.assertNotIn("--label-protocol", cmd)
+
+    def test_every_cli_method_has_a_protocol(self):
+        """A new --method choice that nobody maps here would be named with the
+        wrong table by default, silently."""
+        from src.run import LABEL_PROTOCOL_BY_METHOD, parse_arguments
+        import argparse as _argparse
+
+        # Read the --method choices off the real parser rather than restating
+        # them, so adding a method without registering its protocol fails here.
+        holder = {}
+        real_add = _argparse.ArgumentParser.add_argument
+
+        def capture(parser_self, *a, **kw):
+            if "--method" in a and "choices" in kw:
+                holder["choices"] = set(kw["choices"])
+            return real_add(parser_self, *a, **kw)
+
+        argv = sys.argv
+        sys.argv = ["ants-nidm", "bids", "out", "participant"]
+        try:
+            with patch.object(_argparse.ArgumentParser, "add_argument", capture):
+                try:
+                    parse_arguments()
+                except SystemExit:
+                    pass
+        finally:
+            sys.argv = argv
+
+        self.assertTrue(holder.get("choices"), "could not read --method choices")
+        self.assertEqual(set(LABEL_PROTOCOL_BY_METHOD), holder["choices"])
+
     def test_nidm_conversion_missing_files(self):
         """Test NIDM conversion with missing required files"""
         derivatives_dir = self.output_dir
@@ -240,6 +317,9 @@ class TestRun(unittest.TestCase):
                 self.verbose = True
                 self.skip_bids_validation = True
                 self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 0
+                self.label_interpolation = "genericlabel"
         
         args = Args(self)
         
@@ -337,6 +417,194 @@ class TestRun(unittest.TestCase):
             mock_instance.run_subject.assert_called_once()
             mock_nidm.assert_called_once()
 
+    def test_participant_level_with_session_uses_session_pipeline(self):
+        """BABS always passes the positional level `participant`, even for a
+        session-wise project, and supplies the session as --session-label.
+        Ignoring it would process a multi-session subject as one session."""
+        args = MagicMock(session_label="ses-01")
+
+        with patch("src.run.process_session", return_value=0) as mock_session:
+            result = process_participant(args, self.logger)
+
+        self.assertEqual(result, 0)
+        mock_session.assert_called_once_with(args, self.logger)
+
+    def test_process_participant_segmentation_failure_skips_nidm(self):
+        """run_subject() returning False must not fall through to a NIDM
+        conversion that would report success anyway -- exactly the
+        exit-0-but-wrong shape this repo has been bitten by before (see
+        memory: "a NIDM app can succeed and still be wrong"). Neither
+        test_process_participant (happy path) nor
+        test_processing_summary_records_failure (the summary writer in
+        isolation, not this dispatch) previously covered this branch.
+        """
+        class Args:
+            def __init__(self, test_instance):
+                self.bids_dir = test_instance.bids_dir
+                self.output_dir = test_instance.output_dir
+                self.participant_label = "01"
+                self.session_label = None
+                self.modality = "T1w"
+                self.prob_threshold = 0.5
+                self.method = "fusion"
+                self.skip_nidm = False
+                self.skip_ants = False
+                self.ants_input = None
+                self.num_threads = 1
+                self.verbose = True
+                self.skip_bids_validation = True
+                self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 5
+                self.label_interpolation = "genericlabel"
+
+        args = Args(self)
+
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion') as mock_nidm, \
+             patch('bids.BIDSLayout') as MockBIDSLayout:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']
+            MockBIDSLayout.return_value = mock_layout
+
+            mock_instance = MockSegmenter.return_value
+            mock_instance.run_subject.return_value = False
+            mock_nidm.return_value = True
+
+            result = process_participant(args, self.logger)
+
+            self.assertEqual(result, 1)
+            mock_instance.run_subject.assert_called_once()
+            mock_nidm.assert_not_called()
+
+    def test_process_participant_subject_not_found(self):
+        """A participant label absent from the BIDS layout must fail fast,
+        before touching the segmenter or the filesystem."""
+        class Args:
+            def __init__(self, test_instance):
+                self.bids_dir = test_instance.bids_dir
+                self.output_dir = test_instance.output_dir
+                self.participant_label = "99"
+                self.session_label = None
+                self.modality = "T1w"
+                self.prob_threshold = 0.5
+                self.method = "fusion"
+                self.skip_nidm = False
+                self.skip_ants = False
+                self.ants_input = None
+                self.num_threads = 1
+                self.verbose = True
+                self.skip_bids_validation = True
+                self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 5
+                self.label_interpolation = "genericlabel"
+
+        args = Args(self)
+
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion') as mock_nidm, \
+             patch('bids.BIDSLayout') as MockBIDSLayout:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']  # 99 is not in here
+            MockBIDSLayout.return_value = mock_layout
+            mock_instance = MockSegmenter.return_value
+
+            result = process_participant(args, self.logger)
+
+            self.assertEqual(result, 1)
+            mock_instance.run_subject.assert_not_called()
+            mock_nidm.assert_not_called()
+
+    def test_process_participant_skip_ants_uses_existing_derivatives(self):
+        """--skip-ants must not call run_subject, and with --ants-input set
+        must redirect derivatives_dir there rather than the fresh output_dir
+        (this is the BABS re-run-NIDM-only path)."""
+        class Args:
+            def __init__(self, test_instance, ants_input):
+                self.bids_dir = test_instance.bids_dir
+                self.output_dir = test_instance.output_dir
+                self.participant_label = "01"
+                self.session_label = None
+                self.modality = "T1w"
+                self.prob_threshold = 0.5
+                self.method = "fusion"
+                self.skip_nidm = False
+                self.skip_ants = True
+                self.ants_input = ants_input
+                self.num_threads = 1
+                self.verbose = True
+                self.skip_bids_validation = True
+                self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 5
+                self.label_interpolation = "genericlabel"
+
+        existing_derivatives = os.path.join(self.temp_dir, "existing_derivatives")
+        os.makedirs(existing_derivatives, exist_ok=True)
+        args = Args(self, ants_input=existing_derivatives)
+
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion') as mock_nidm, \
+             patch('bids.BIDSLayout') as MockBIDSLayout:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']
+            mock_layout.get.return_value = []
+            MockBIDSLayout.return_value = mock_layout
+            mock_instance = MockSegmenter.return_value
+            mock_nidm.return_value = True
+
+            result = process_participant(args, self.logger)
+
+            mock_instance.run_subject.assert_not_called()
+            self.assertEqual(result, 0)
+            # nidm_conversion must have been pointed at ants_input, not the
+            # fresh (empty) output_dir -- called with derivatives_dir as a
+            # positional/keyword arg either way, so inspect the call.
+            _, kwargs = mock_nidm.call_args
+            self.assertEqual(str(kwargs.get("derivatives_dir")), existing_derivatives)
+
+    def test_process_participant_skip_nidm_leaves_segmentation_result_alone(self):
+        """--skip-nidm must not call nidm_conversion, and a successful
+        segmentation with NIDM skipped is still reported as success -- the
+        skip is a deliberate no-op, not a failure."""
+        class Args:
+            def __init__(self, test_instance):
+                self.bids_dir = test_instance.bids_dir
+                self.output_dir = test_instance.output_dir
+                self.participant_label = "01"
+                self.session_label = None
+                self.modality = "T1w"
+                self.prob_threshold = 0.5
+                self.method = "fusion"
+                self.skip_nidm = True
+                self.skip_ants = False
+                self.ants_input = None
+                self.num_threads = 1
+                self.verbose = True
+                self.skip_bids_validation = True
+                self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 5
+                self.label_interpolation = "genericlabel"
+
+        args = Args(self)
+
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion') as mock_nidm, \
+             patch('bids.BIDSLayout') as MockBIDSLayout:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']
+            MockBIDSLayout.return_value = mock_layout
+            mock_instance = MockSegmenter.return_value
+            mock_instance.run_subject.return_value = True
+
+            result = process_participant(args, self.logger)
+
+            self.assertEqual(result, 0)
+            mock_instance.run_subject.assert_called_once()
+            mock_nidm.assert_not_called()
+
     @unittest.skipIf(IN_CI, "Skip in CI environment as it requires modifying template directory")
     def test_process_session(self):
         """Test session level processing with NIDM conversion"""
@@ -361,6 +629,9 @@ class TestRun(unittest.TestCase):
                 self.verbose = True
                 self.skip_bids_validation = True
                 self.nidm_input_dir = None
+                self.device = "cuda"
+                self.fireants_batch_size = 0
+                self.label_interpolation = "genericlabel"
         
         args = Args(self)
         
@@ -526,6 +797,40 @@ class TestRun(unittest.TestCase):
         self.assertEqual(summary["failure_list"], ["sub-01_ses-baseline"])
         self.assertFalse(summary["nidm_written"])
 
+    def test_processing_summary_records_the_input_used(self):
+        """The segmented image and any skipped alternatives are recorded,
+        relative to the BIDS root."""
+        bids = Path(self.temp_dir) / "bids_inputs"
+        anat = bids / "sub-01" / "ses-1" / "anat"
+        anat.mkdir(parents=True)
+        used = anat / "sub-01_ses-1_run-1_T1w.nii.gz"
+        other = anat / "sub-01_ses-1_acq-hires_run-1_T1w.nii.gz"
+        path = save_processing_summary(
+            logger=self.logger,
+            subject_dir=subject_output_dir(self.output_dir, "01", "1"),
+            bids_subject="01", bids_session="1", app_version=APP_VERSION,
+            succeeded=True, nidm_written=True,
+            bids_dir=bids, failure_reason=None,
+            anat_choice=AnatChoice(used, [other], [(anat / "sub-01_ses-1_acq-lo_T1w.nii.gz", (1.5, 1.5, 4.0))]),
+        )
+        with open(path) as f:
+            summary = json.load(f)
+        self.assertEqual(summary["input_file"], "sub-01/ses-1/anat/sub-01_ses-1_run-1_T1w.nii.gz")
+        self.assertEqual(summary["inputs_not_used"],
+                         ["sub-01/ses-1/anat/sub-01_ses-1_acq-hires_run-1_T1w.nii.gz"])
+        self.assertEqual(summary["inputs_too_coarse"],
+                         {"sub-01/ses-1/anat/sub-01_ses-1_acq-lo_T1w.nii.gz": [1.5, 1.5, 4.0]})
+
+    def test_processing_summary_records_failure_reason(self):
+        path = save_processing_summary(
+            logger=self.logger, subject_dir=subject_output_dir(self.output_dir, "01"),
+            bids_subject="01", bids_session=None, app_version=APP_VERSION,
+            succeeded=False, nidm_written=False,
+            failure_reason="every T1w image is coarser than 2.0 mm",
+        )
+        with open(path) as f:
+            self.assertEqual(json.load(f)["failure_reason"], "every T1w image is coarser than 2.0 mm")
+
     def test_subject_output_dir(self):
         """Per-subject output dir is the zip unit: no app wrapper, no nidm/."""
         self.assertEqual(str(subject_output_dir("/out", "01")), "/out/sub-01")
@@ -556,6 +861,75 @@ class TestRun(unittest.TestCase):
         (sess / "nidm.ttl").write_text("")
         self.assertEqual(find_nidm_input_file(nidm_in, "02", "baseline"),
                          sess / "nidm.ttl")
+
+    def test_device_defaults_to_cuda(self):
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        argv = ["ants-nidm", "/bids", "/out", "participant"]
+        with patch.object(sys, "argv", argv):
+            args = parse_arguments()
+        self.assertEqual(args.device, "cuda")
+        self.assertEqual(args.fireants_batch_size, 5)
+        self.assertEqual(args.label_interpolation, "genericlabel")
+
+    def test_device_and_engine_options_are_parsed(self):
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        argv = [
+            "ants-nidm", "/bids", "/out", "participant",
+            "--device", "cpu",
+            "--fireants-batch-size", "5",
+            "--label-interpolation", "nearest",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = parse_arguments()
+        self.assertEqual(args.device, "cpu")
+        self.assertEqual(args.fireants_batch_size, 5)
+        self.assertEqual(args.label_interpolation, "nearest")
+
+    def test_skip_ants_requires_the_method_that_made_the_input(self):
+        """--skip-ants names the structures of --ants-input with the protocol
+        of --method. Defaulting to fusion would name quick derivatives (aseg
+        ids) with the Neuromorphometrics table: a valid, wrong NIDM file."""
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        base = ["ants-nidm", "/bids", "/out", "participant", "--skip-ants", "--ants-input", "/in"]
+        with patch.object(sys, "argv", base), self.assertRaises(SystemExit):
+            parse_arguments()
+        with patch.object(sys, "argv", base + ["--method", "quick"]):
+            self.assertEqual(parse_arguments().method, "quick")
+        with patch.object(sys, "argv", ["ants-nidm", "/bids", "/out", "participant"]):
+            self.assertEqual(parse_arguments().method, "fusion")
+
+    def test_invalid_device_is_rejected(self):
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        argv = ["ants-nidm", "/bids", "/out", "participant", "--device", "mps"]
+        with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
+            parse_arguments()
+
+    def test_negative_batch_size_is_rejected(self):
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        argv = ["ants-nidm", "/bids", "/out", "participant",
+                "--fireants-batch-size", "-2"]
+        with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
+            parse_arguments()
 
 if __name__ == "__main__":
     unittest.main()

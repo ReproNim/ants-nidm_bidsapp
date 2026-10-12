@@ -1,10 +1,12 @@
 # src/ants/wrapper.py
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import logging
 import importlib
+from contextlib import contextmanager
 import ants
 import nibabel as nib
 import numpy as np
@@ -12,6 +14,28 @@ import pandas as pd
 from pathlib import Path
 import glob
 from natsort import natsorted
+
+from src.registration import apply_warp, build_label_map, register_to_template, warp_atlases
+from src.registration.device import resolve_device
+from src.antspy.inputs import DEFAULT_MAX_VOXEL_SIZE, bids_relative, choose_anat_input
+
+#: Registration scratch for one subject is ~1-2 GB; below this much free
+#: space under $TMPDIR the app uses output_dir/tmp instead.
+MIN_SCRATCH_FREE_BYTES = 4 * 2**30
+
+#: joint_label_fusion settings for --method fusion. Why max_lab_plus_one and
+#: usecor are what they are is explained at the call in segment_image. Kept
+#: here so validation harnesses fuse with exactly the production settings.
+JLF_PARAMS = dict(
+    beta=4.0,
+    rad=2,
+    rho=0.01,
+    usecor=True,
+    r_search=3,
+    nonnegative=False,
+    no_zeroes=False,
+    max_lab_plus_one=True,
+)
 
 class ANTsSegmentation:
     """
@@ -27,6 +51,10 @@ class ANTsSegmentation:
                  modality='T1w',
                  prob_threshold=0.5,
                  num_threads=1,
+                 device='cuda',
+                 fireants_batch_size=5,
+                 label_interpolation='genericlabel',
+                 max_voxel_size=DEFAULT_MAX_VOXEL_SIZE,
                  verbose=False):
         """Initialize ANTs segmentation.
         
@@ -44,13 +72,42 @@ class ANTsSegmentation:
             Probability threshold for binary mask creation
         num_threads : int
             Number of threads to use
+        device : str
+            Compute device for FireANTs registration ('cuda' or 'cpu')
+        fireants_batch_size : int
+            Atlases per FireANTs registration batch (0 = all at once). 20 at once
+            exceeds 80 GB of GPU memory; 5 keeps peak use under ~20 GB
+        max_voxel_size : float or None
+            Inputs coarser than this (mm, any dimension) are not segmented.
+        label_interpolation : str
+            Interpolation mode FireANTs uses when warping atlas labels
         verbose : bool
             Whether to print detailed logs
         """
         # Convert all path inputs to Path objects
         self.bids_dir = Path(bids_dir) if bids_dir else None
         self.output_dir = Path(output_dir) if output_dir else None
-        self.temp_dir = Path(temp_dir) if temp_dir else (Path(output_dir) / 'tmp' if output_dir else None)
+        # Scratch root. Order matters:
+        #   1. an explicit temp_dir the caller passed -- never touched beyond
+        #      creating per-run subdirectories inside it;
+        #   2. $TMPDIR, which the container sets to the writable /work bind
+        #      that run_container.sh and both sbatch scripts already mount.
+        #      Nothing read it before, so ~1-2 GB of warped-atlas scratch per
+        #      subject went to the output tree instead (every ANTsPy/FireANTs
+        #      crossing goes through a file on TMPDIR);
+        #   3. output_dir/tmp, the previous behaviour, as a last resort, and
+        #      when $TMPDIR is read-only or too small (BABS's --writable-tmpfs);
+        #      see _usable_tmpdir_or_output_tree.
+        scratch_from_tmpdir = False
+        if temp_dir:
+            self.temp_dir = Path(temp_dir)
+        elif os.environ.get('TMPDIR'):
+            self.temp_dir = Path(os.environ['TMPDIR']) / 'ants-nidm'
+            scratch_from_tmpdir = True
+        elif output_dir:
+            self.temp_dir = Path(output_dir) / 'tmp'
+        else:
+            self.temp_dir = None
         
         # Set data paths - check both container and local paths
         # First check for container path, then local development path
@@ -98,6 +155,16 @@ class ANTsSegmentation:
         self.modality = modality
         self.prob_threshold = prob_threshold
         self.num_threads = num_threads
+        # Registration runs on FireANTs. resolve_device raises rather than
+        # silently falling back to CPU: FireANTs on CPU is slower than the ANTs
+        # code it replaced, so a fallback under a BABS array yields hundreds of
+        # many-hour jobs that all exit 0.
+        self.device = resolve_device(device)
+        self.fireants_batch_size = fireants_batch_size
+        self.label_interpolation = label_interpolation
+        self.max_voxel_size = max_voxel_size
+        # Why the last run_subject call failed, for processing_summary.json.
+        self.last_failure_reason = None
         self.verbose = verbose
 
         # ANTsPy takes no threads argument: every ITK filter it calls reads
@@ -124,6 +191,8 @@ class ANTsSegmentation:
         
         # Create necessary directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        if scratch_from_tmpdir:
+            self.temp_dir = self._usable_tmpdir_or_output_tree(self.temp_dir)
         if self.temp_dir:
             self.temp_dir.mkdir(parents=True, exist_ok=True)
             
@@ -148,6 +217,60 @@ class ANTsSegmentation:
         if not self.template_labels_path.exists():
             self.logger.warning(f"Template labels file not found: {self.template_labels_path}")
             
+    def _usable_tmpdir_or_output_tree(self, candidate):
+        """candidate (under $TMPDIR) if it is writable with room for a subject's
+        registration scratch, else output_dir/tmp.
+
+        In the image TMPDIR is /work. With a bind over it (run_container.sh,
+        the sbatch harnesses) that is real disk. Without one it is either
+        read-only (plain `apptainer run`) or, under --writable-tmpfs as BABS
+        runs it, an overlay capped by Apptainer's "sessiondir max size"
+        (64 MiB on ORCD), where the warps fail with ENOSPC mid-subject.
+        """
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(candidate).free
+        except OSError as e:
+            reason = f"not writable ({e})"
+        else:
+            if free >= MIN_SCRATCH_FREE_BYTES:
+                return candidate
+            reason = f"only {free / 2**30:.2f} GiB free"
+        fallback = self.output_dir / 'tmp'
+        self.logger.warning(f"TMPDIR scratch {candidate} is {reason}; using {fallback}. "
+                            f"Bind a writable directory over $TMPDIR to avoid this.")
+        # ants.joint_label_fusion writes its ~100 probability images with
+        # mktemp, and antsBrainExtraction.sh inherits TMPDIR, so move the
+        # process-wide temp root too, not only this class's scratch.
+        fallback.mkdir(parents=True, exist_ok=True)
+        os.environ['TMPDIR'] = str(fallback)
+        tempfile.tempdir = None
+        return fallback
+
+    @contextmanager
+    def _scratch(self, prefix):
+        """A private scratch directory under temp_dir, removed on exit.
+
+        Deliberately never yields temp_dir itself. temp_dir may be a path the
+        caller handed us, or the container's /work bind shared with other
+        jobs; deleting it is not ours to do. `mkdtemp` gives a directory we
+        created and therefore may remove, so cleanup cannot reach anything
+        passed in on purpose.
+
+        This exists because nothing used to delete the per-subject
+        registration scratch at all: warp_atlases writes target.nii.gz plus 40
+        warped volumes (~1-2 GB) per subject and they accumulated for the life
+        of the output tree.
+        """
+        base = str(self.temp_dir) if self.temp_dir else None
+        if base:
+            Path(base).mkdir(parents=True, exist_ok=True)
+        path = Path(tempfile.mkdtemp(prefix=prefix, dir=base))
+        try:
+            yield path
+        finally:
+            shutil.rmtree(path, ignore_errors=True)
+
     def _load_templates(self):
         """Load OASIS-30 Atropos templates.
         
@@ -233,97 +356,6 @@ class ANTsSegmentation:
         
         return brain_image
     
-    def segment_with_jointfusion(self, target_image, atlas_images, atlas_labels=None, search_radius=3, patch_radius=2, beta=4.0, rho=0.01, use_correlation=False, non_negative=False, no_zeroes=False, max_lab_plus_one=False):
-        """Perform ANTs JointLabelFusion segmentation.
-        
-        Parameters
-        ----------
-        target_image : ants.ANTsImage
-            Target image to segment
-        atlas_images : list of ants.ANTsImage
-            List of atlas images registered to target space
-        atlas_labels : list of ants.ANTsImage, optional  
-            List of atlas label images registered to target space.
-            If not provided, will perform intensity fusion only.
-        search_radius : int, optional
-            Search radius for patch matching (default=3)
-        patch_radius : int, optional
-            Patch radius for local intensity similarity (default=2)
-        beta : float, optional
-            Weight sharpness parameter for patch similarity (default=4.0)
-        rho : float, optional
-            Gradient step size (default=0.01)
-        use_correlation : bool, optional
-            Use correlation metric (default=False)
-        non_negative : bool, optional
-            Use non-negative weights (default=False)
-        no_zeroes : bool, optional
-            Exclude zeroes from computations (default=False)
-        max_lab_plus_one : bool, optional
-            Add max label plus one to output (default=False)
-            
-        Returns
-        -------
-        dict
-            Dictionary containing:
-            - 'segmentation': ANTsImage of segmentation (None if no atlas_labels provided)
-            - 'intensity': ANTsImage of intensity fusion result
-            - 'probabilityimages': list of probability maps (empty if no atlas_labels provided)
-            - 'segmentation_numbers': list of label numbers (empty if no atlas_labels provided)
-        """
-        self.logger.info("Starting JointLabelFusion segmentation")
-        
-        # Get mask for segmentation
-        mask = ants.get_mask(target_image)
-        
-        # Run JointLabelFusion
-        if atlas_labels is None:
-            self.logger.info("No atlas labels provided, performing intensity fusion only")
-            intensity = ants.joint_label_fusion(
-                target_image=target_image,
-                target_image_mask=mask,
-                atlas_list=atlas_images,
-                label_list=None,
-                beta=beta,
-                rad=patch_radius,
-                r_search=search_radius,
-                rho=rho,
-                usecor=use_correlation,
-                nonnegative=non_negative,
-                no_zeroes=no_zeroes,
-                max_lab_plus_one=max_lab_plus_one,
-                verbose=self.verbose
-            )[1]  # Only take intensity result
-            return {
-                'segmentation': None,
-                'intensity': intensity,
-                'probabilityimages': [],
-                'segmentation_numbers': []
-            }
-        else:
-            seg, intensity, probimgs, labels = ants.joint_label_fusion(
-                target_image=target_image,
-                target_image_mask=mask,
-                atlas_list=atlas_images,
-                label_list=atlas_labels,
-                beta=beta,
-                rad=patch_radius,
-                r_search=search_radius,
-                rho=rho,
-                usecor=use_correlation,
-                nonnegative=non_negative,
-                no_zeroes=no_zeroes,
-                max_lab_plus_one=max_lab_plus_one,
-                verbose=self.verbose
-            )
-            
-            return {
-                'segmentation': seg,
-                'intensity': intensity,
-                'probabilityimages': probimgs,
-                'segmentation_numbers': labels
-            }
-
     def segment_image(self, image, method='fusion', **kwargs):
         """Perform ANTs segmentation on the given image.
         
@@ -345,7 +377,8 @@ class ANTsSegmentation:
         """
         # Run cortical thickness to get N4 correction and brain mask
         self.logger.info("Running cortical thickness pipeline for preprocessing")
-        thickness_results = self.compute_cortical_thickness(image)
+        thickness_results = self.compute_cortical_thickness(
+            image, register_template=(method == 'quick'))
         
         # Create masked brain image (equivalent to MultiplyImages node)
         self.logger.info("Creating masked brain image")
@@ -356,23 +389,24 @@ class ANTsSegmentation:
             if not self.template_labels_path.exists():
                 raise ValueError(f"Template labels not found: {self.template_labels_path}")
                 
-            template_labels = ants.image_read(str(self.template_labels_path))
-            
-            # Apply template-to-subject transforms to the label atlas. As above,
-            # whichtoinvert is left unset so ANTsPy infers it from the transform
-            # shapes; the previous code hardcoded False for every element, which
-            # is wrong for the affine in an invtransforms list.
-            transformlist = thickness_results.get('TemplateToSubjectTransforms') or []
-            if not transformlist:
-                raise ValueError("No transforms available for template-to-subject mapping")
+            template_warp = thickness_results.get('TemplateWarp')
+            if template_warp is None:
+                raise ValueError("No TemplateWarp available for template-to-subject mapping")
 
-            warped_labels = ants.apply_transforms(
-                fixed=thickness_results['BrainSegmentationN4'],
-                moving=template_labels,
-                transformlist=transformlist,
-                interpolator='nearestNeighbor'
-            )
-            
+            label_map = build_label_map([self.template_labels_path])
+            # The returned image is fully in memory, so the scratch NIfTIs the
+            # warp round-trips through can go as soon as the call returns.
+            with self._scratch('warp_') as scratch:
+                warped_labels = apply_warp(
+                    template_warp,
+                    ants.image_read(str(self.template_labels_path)),
+                    thickness_results['BrainSegmentationN4'],
+                    temp_dir=scratch,
+                    interpolation=self.label_interpolation,
+                    label_map=label_map,
+                    logger=self.logger,
+                )
+
             return {
                 'segmentation': warped_labels,
                 'BrainSegmentationN4': thickness_results['BrainSegmentationN4'],
@@ -404,57 +438,78 @@ class ANTsSegmentation:
             if len(T1s) != len(labels):
                 self.logger.warning(f"Number of atlas images ({len(T1s)}) does not match number of labels ({len(labels)})")
                 
-            # Load atlas images and labels
-            atlas_images = [ants.image_read(str(path)) for path in T1s]
-            atlas_labels = [ants.image_read(str(path)) for path in labels]
-            
-            # Register each atlas to the masked brain
-            warped_images = []
-            warped_labels = []
-            
-            for atlas_img, atlas_lab in zip(atlas_images, atlas_labels):
-                # Register atlas to target
-                reg = ants.registration(
-                    fixed=masked_brain,
-                    moving=atlas_img,
-                    type_of_transform='SyNRA',  # Combined rigid, affine, and SyN registration
-                    reg_iterations=[200, 200, 100],
-                    transform_parameters=(0.1, 3, 0),
-                    flow_sigma=3,
-                    total_sigma=0,
-                    aff_metric='mattes',
-                    syn_metric='mattes',
-                    verbose=True
+            # Registration is FireANTs; the fusion voting below stays on ANTs.
+            # Images cross the boundary as NIfTI files under temp_dir and are
+            # geometry-checked on the way back -- see src/registration/handoff.py.
+            # ~1-2 GB of target + 40 warped volumes, in a directory of our own
+            # under TMPDIR. warp_atlases reads every one of them back into
+            # memory as an ANTsImage before returning (and joint_label_fusion
+            # below passes in-memory pointers), so the files are dead the
+            # moment the call returns.
+            with self._scratch('fireants_') as scratch:
+                warped_images, warped_labels = warp_atlases(
+                    masked_brain,
+                    thickness_results['BrainExtractionMask'],
+                    T1s,
+                    labels,
+                    temp_dir=scratch,
+                    device=self.device,
+                    batch_size=self.fireants_batch_size,
+                    label_interpolation=self.label_interpolation,
+                    logger=self.logger,
                 )
-                
-                # Apply transforms to atlas labels
-                warped_lab = ants.apply_transforms(
-                    fixed=masked_brain,
-                    moving=atlas_lab,
-                    transformlist=reg['fwdtransforms'],
-                    interpolator='nearestNeighbor',
-                    whichtoinvert=[False] * len(reg['fwdtransforms'])
-                )
-                
-                warped_images.append(reg['warpedmovout'])
-                warped_labels.append(warped_lab)
-            
+
             # Perform joint label fusion
+            #
+            # max_lab_plus_one=True is required, not a tuning knob. The
+            # brain extraction mask is much larger than the union of the
+            # labelled structures: the atlases leave CSF and everything
+            # between structures at 0. The vote has no background class, so
+            # with max_lab_plus_one=False every one of those masked-but-
+            # unlabelled voxels still has to be assigned a real label, and an
+            # argmax over a probability stack that is ~0 everywhere returns
+            # the first entry -- the lowest label id, which for this atlas
+            # vocabulary is 4, the third ventricle.
+            #
+            # That is not hypothetical. The delivered tier-2 output for
+            # sub-0051456 called 89924 voxels "3rd ventricle" against ~700 in
+            # the atlases, in 2725 disconnected components, 74% of them within
+            # 3 voxels of the mask boundary, and 96% of them at a maximum
+            # across-label probability below 0.05. A minimal reproduction
+            # (scripts/diag_jlf_background_fallback.py) shows the same 54x
+            # inflation and shows this flag removing it exactly.
+            #
+            # no_zeroes=True also empties the band, but it constrains the
+            # solution to voxels non-zero in *every* atlas, which erodes real
+            # structures at their boundaries -- in the reproduction it
+            # undershoots the true structure by a third. max_lab_plus_one
+            # recovers it exactly.
+            #
+            # usecor=True is also not a tuning knob. The target (N4-corrected
+            # masked brain, in-mask median ~388) and the OASIS-TRT-20 atlas
+            # brains (~1100) are on different intensity scales, and the
+            # default mean-squared-difference similarity is not
+            # scale-invariant: the r_search patch search moves each atlas's
+            # labels toward wherever raw intensity matches. Subject WM then
+            # matches darker atlas tissue, so WM-like structures shrink and
+            # GM/CSF grow -- on 6 Caltech subjects vs FreeSurfer, brain stem
+            # 0.38x, cerebellar WM 0.20-0.21x, lateral ventricles 3.2x, mean
+            # Dice 0.36-0.40. Correlation is scale-invariant; with it the same
+            # subjects reach 0.69-0.76, with higher Dice than r_search=0 or
+            # rescaling the target in every structure group and on every
+            # subject (scripts/diag_jlf_validation_summary.py). The bias predates
+            # FireANTs: the ANTs-registered August outputs carry it too.
+            #
+            # Side effect documented by ANTsPy: this mutates the label images
+            # passed in. warped_labels is not used again after this call.
             self.logger.info(f"Running joint label fusion with {len(warped_images)} atlases")
             fusion = ants.joint_label_fusion(
                 target_image=masked_brain,
                 target_image_mask=thickness_results['BrainExtractionMask'],
                 atlas_list=warped_images,
                 label_list=warped_labels,
-                beta=4.0,
-                rad=2,
-                rho=0.01,
-                usecor=False,
-                r_search=3,
-                nonnegative=False,
-                no_zeroes=False,
-                max_lab_plus_one=False,
-                verbose=True
+                verbose=True,
+                **JLF_PARAMS,
             )
             
             return {
@@ -515,23 +570,34 @@ class ANTsSegmentation:
 
         label_values, label_counts = np.unique(labels.astype(np.int64), return_counts=True)
         
-        # Filter out problematic labels:
-        # - 0: background
-        # - 21-23: FreeSurfer reference lines (spatial markers, not brain structures)
-        # - 75-76: Removed from FreeSurferColorLUT as duplicates of 4/43
-        # These are present in OASIS-TRT-20_DKT31_CMA_labels_v2 but should not be in stats
-        invalid_labels = [0, 21, 22, 23, 75, 76]
-        valid_mask = ~np.isin(label_values, invalid_labels)
+        # Only background is left out. Ids 21-23 and 75-76 used to be dropped
+        # as FreeSurfer reference lines and retired LUT entries, but --method
+        # fusion emits Neuromorphometrics ids (label_vocabulary.py), where 23
+        # is Right Accumbens and 75/76 the basal forebrain; quick's aseg map
+        # contains none of them.
+        valid_mask = label_values != 0
         label_values = label_values[valid_mask]
         label_counts = label_counts[valid_mask]
         label_volumes_mm3 = label_counts * voxel_volume
-        
-        # Log info if reference line labels were filtered
-        filtered_ref_lines = [lbl for lbl in [21, 22, 23] if lbl in np.unique(labels.astype(np.int64))]
-        if filtered_ref_lines:
-            self.logger.info(f"Filtered FreeSurfer reference line labels from stats output: {filtered_ref_lines}")
 
-        brain_volume = float(label_volumes_mm3.sum()) if label_volumes_mm3.size else 0.0
+        label_volume_sum = float(label_volumes_mm3.sum()) if label_volumes_mm3.size else 0.0
+
+        # BVOL is the brain extraction mask volume, as in ANTs'
+        # antsCorticalThickness.sh, and its data element says it is about the
+        # brain (UBERON_0000955). It used to be the label sum above, which is
+        # not a brain volume: the DKT31_CMA label set has no cerebral white
+        # matter label, so the sum is about half a brain (0.90-1.03 L against
+        # a mask of 1.68-1.87 L on 6 Caltech subjects). The mask agrees with
+        # FreeSurfer's BrainSegVol within 0.8-4.2% on the same subjects. It
+        # includes the ventricles and some sulcal CSF, so it is not a
+        # parenchymal volume. The label sum is still reported, as LABELVOL.
+        mask_image = segmentation.get('BrainExtractionMask')
+        if mask_image is None:
+            raise ValueError(
+                "segmentation has no BrainExtractionMask; BVOL is the brain mask "
+                "volume and cannot be computed without it"
+            )
+        brain_volume = float(np.count_nonzero(mask_image.numpy())) * float(np.prod(mask_image.spacing))
 
         # Generate antslabelstats.csv with subject prefix
         seg_base = f"sub-{bids_subject}{session_part}"
@@ -545,7 +611,8 @@ class ANTsSegmentation:
 
         # Generate antsbrainvols.csv
         #
-        # Only BVOL is reported. This used to also emit CSFVOL/GMVOL/WMVOL from
+        # BVOL (brain mask) and LABELVOL (label sum), and no tissue volumes.
+        # This used to also emit CSFVOL/GMVOL/WMVOL from
         # probabilityimages[0], [1] and [2], on the assumption that those are
         # CSF/GM/WM tissue posteriors. They are not, in either method:
         #   - 'fusion' returns one posterior per *anatomical label* (103 of them
@@ -558,7 +625,7 @@ class ANTsSegmentation:
         # Deriving real tissue volumes means grouping DKT labels into tissue
         # classes (or running Atropos for posteriors), which is a separate piece
         # of work; reporting nothing beats reporting numbers off by ~100x.
-        brain_vol_data = {"BVOL": brain_volume}
+        brain_vol_data = {"BVOL": brain_volume, "LABELVOL": label_volume_sum}
 
         brainvols_file = stats_dir / f"{seg_base}_antsbrainvols.csv"
         pd.DataFrame([brain_vol_data]).to_csv(brainvols_file, index=False)
@@ -588,6 +655,7 @@ class ANTsSegmentation:
         self.logger.info(f"Saved segmentation results for subject {bids_subject}")
         volume_info = {
             'brain_volume': brain_volume,
+            'label_volume_sum': label_volume_sum,
             'label_stats': str(labelstats_file),
             'brain_vols': str(brainvols_file),
             'segmentation': str(label_path),
@@ -620,9 +688,13 @@ class ANTsSegmentation:
             # Organize outputs in BIDS format
             volumes = self._organize_bids_output(segmentation, bids_subject, bids_session)
             
-            # Add input T1w file information if provided
+            # Add input T1w file information if provided, and record it in the
+            # dseg sidecar as a BIDS Sources entry
             if input_t1w:
                 volumes['input_t1w'] = str(input_t1w)
+                sidecar = Path(volumes['segmentation'].replace('.nii.gz', '.json'))
+                rel = bids_relative(input_t1w, self.bids_dir)
+                sidecar.write_text(json.dumps({"Sources": [f"bids:raw:{rel}"]}, indent=2) + "\n")
             
             # Add template and atlas information
             volumes['templates'] = {
@@ -675,31 +747,36 @@ class ANTsSegmentation:
             else:
                 bids_session = None
                 
-            # Construct path to input image
-            if bids_session:
-                bids_path = self.bids_dir / f"sub-{bids_subject}" / f"ses-{bids_session}" / "anat"
-                img_pattern = f"sub-{bids_subject}_ses-{bids_session}_{self.modality}.nii.gz"
-            else:
-                bids_path = self.bids_dir / f"sub-{bids_subject}" / "anat"
-                img_pattern = f"sub-{bids_subject}_{self.modality}.nii.gz"
-            
-            # Find input image
-            input_file = list(bids_path.glob(img_pattern))
-            if not input_file:
+            self.last_failure_reason = None
+            # Find input image (run-/acq- entities allowed; see inputs.py)
+            choice = choose_anat_input(self.bids_dir, bids_subject, bids_session,
+                                       suffix=self.modality,
+                                       max_voxel_size=self.max_voxel_size,
+                                       logger=self.logger)
+            input_file = choice.chosen
+            if input_file is None and choice.too_coarse:
+                self.last_failure_reason = (
+                    f"every {self.modality} image is coarser than "
+                    f"{self.max_voxel_size} mm: " + ", ".join(
+                        f"{p.name} {z}" for p, z in choice.too_coarse))
+                self.logger.error(f"Not segmenting {subject_id}: {self.last_failure_reason}")
+                return False
+            if input_file is None:
+                self.last_failure_reason = f"no {self.modality} image found"
                 self.logger.error(f"No {self.modality} image found for subject {subject_id}")
                 return False
-            
-            input_file = input_file[0]
             self.logger.info(f"Processing {input_file}")
             
             # Load image using helper to centralize error handling (and simplify testing)
             img = self.load_image(str(input_file))
             if img is None:
+                self.last_failure_reason = f"could not load {input_file.name}"
                 return False
             
             # Run segmentation
             segmentation = self.segment_image(img, method=method)
             if not segmentation:
+                self.last_failure_reason = f"segmentation of {input_file.name} returned no result"
                 return False
             
             # Save results and get volumes, passing the input T1w file path
@@ -709,7 +786,9 @@ class ANTsSegmentation:
             if volumes:
                 self.logger.info("Segmentation volumes:")
                 if 'brain_volume' in volumes:
-                    self.logger.info(f"  BVOL: {volumes['brain_volume']:.2f} mm³")
+                    self.logger.info(f"  BVOL (brain mask): {volumes['brain_volume']:.2f} mm³")
+                if 'label_volume_sum' in volumes:
+                    self.logger.info(f"  LABELVOL (sum of labels): {volumes['label_volume_sum']:.2f} mm³")
                 if 'label_volumes' in volumes:
                     for label, volume in volumes['label_volumes'].items():
                         self.logger.info(f"  Label {label}: {volume:.2f} mm³")
@@ -718,16 +797,20 @@ class ANTsSegmentation:
             return True
             
         except Exception as e:
+            self.last_failure_reason = f"{type(e).__name__}: {e}"
             self.logger.error(f"Error processing subject {subject_id}: {str(e)}")
             return False
         
-    def compute_cortical_thickness(self, image):
+    def compute_cortical_thickness(self, image, register_template=True):
         """Compute cortical thickness using ANTs.
         
         Parameters
         ----------
         image : ants.ANTsImage
             Input brain image
+        register_template : bool, optional
+            Also register the brain to the OASIS-30 template and return the
+            warp as 'TemplateWarp'. Only --method quick uses it.
             
         Returns
         -------
@@ -797,75 +880,41 @@ class ANTsSegmentation:
             # read back into memory.
             shutil.rmtree(abe_dir, ignore_errors=True)
 
-        brain_image = n4_image * final_mask
-
-        reg_template = ants.image_read(str(self.template_dir / 'T_template0_BrainCerebellum.nii.gz'))
-        
-        # Register to the brain-only template. brain_image is skull-stripped at
-        # this point, so the fixed image must be skull-stripped too
-        # (T_template0_BrainCerebellum, already loaded above as reg_template).
-        # Registering it onto the whole-head T_template0 biased the affine
-        # toward scaling the brain up to the head outline, inflating every
-        # template-space image warped back with these transforms.
-        self.logger.info("Registering to template")
-        brain_template = reg_template
-
-        try:
-            # First try affine registration
-            affine_reg = ants.registration(
-                fixed=brain_template,
-                moving=brain_image,
-                type_of_transform='Affine',
-                aff_metric='mattes',
-                aff_sampling=32,
-                reg_iterations=[100, 100, 100],
-                verbose=True,
-                random_seed=1
-            )
-            
-            # Then try SyN registration starting from affine
-            reg = ants.registration(
-                fixed=brain_template,
-                moving=brain_image,
-                type_of_transform='SyN',
-                initial_transform=affine_reg['fwdtransforms'][0],
-                aff_metric='mattes',
-                syn_metric='mattes',
-                reg_iterations=[100, 70, 50, 20],
-                verbose=True,
-                random_seed=1
-            )
-            
-            # These registrations are subject -> template (fixed=brain_template,
-            # moving=brain_image), so fwdtransforms maps subject -> template.
-            # Everything downstream needs the opposite direction -- pulling
-            # template-space images (the brain probability mask, and the label atlas in
-            # the 'quick' method) into subject space -- which is invtransforms:
-            # "invtransforms: Transforms to move from fixed to moving image".
-            #
-            # Using fwdtransforms here yielded a mask covering the entire FOV, so
-            # joint label fusion labelled air, skull and neck: 100% of voxels
-            # labelled, no background at all, label 4 alone taking 69.6% of the
-            # image, and an 11.5 L "brain volume" on ABIDE sub-0051456. The
-            # initial-mask call above was always correct; only this one was not.
-            transforms = list(reg['invtransforms'])
-
-        except Exception as e:
-            self.logger.warning(f"SyN registration failed: {str(e)}")
-            self.logger.info("Using affine registration only")
-            transforms = list(affine_reg['invtransforms'])
-
-        # Prepare results dictionary. BrainExtractionMask is the canonical
-        # script's product, untouched: its Atropos refinement and morphology
-        # already finalized it.
+        # BrainExtractionMask is the canonical script's product, untouched: its
+        # Atropos refinement and morphology already finalized it.
         results = {
             'BrainSegmentationN4': n4_image,
-            'BrainExtractionMask': final_mask
+            'BrainExtractionMask': final_mask,
         }
-        
-        # Template -> subject transforms, kept as the ordered list ANTsPy
-        # returned. Consumers pass it to apply_transforms verbatim rather than
-        # rebuilding it element by element.
-        results['TemplateToSubjectTransforms'] = transforms
+        if not register_template:
+            return results
 
+        brain_image = n4_image * final_mask
+
+        # Register to the brain-only template. brain_image is skull-stripped at
+        # this point, so the template argument passed to register_to_template
+        # below must be skull-stripped too. Registering onto the whole-head
+        # T_template0 biased the affine toward scaling the brain up to the
+        # head outline, inflating every template-space image warped back
+        # through this warp.
+        brain_template = ants.image_read(
+            str(self.template_dir / 'T_template0_BrainCerebellum.nii.gz'))
+
+        self.logger.info("Registering to template (FireANTs)")
+        # register_to_template sets fixed=subject, moving=template, so the
+        # returned warp already points template -> subject: the direction every
+        # consumer needs. There is no fwd/inv pair to choose between, which is
+        # what previously produced an 11.5 L brain volume on ABIDE sub-0051456.
+        # TemplateWarp holds torch tensors, not files: the two NIfTIs written
+        # here are only needed while FireANTs loads them.
+        with self._scratch('tplreg_') as scratch:
+            template_warp = register_to_template(
+                brain_image,
+                brain_template,
+                temp_dir=scratch,
+                device=self.device,
+                logger=self.logger,
+            )
+
+        results['TemplateWarp'] = template_warp
         return results

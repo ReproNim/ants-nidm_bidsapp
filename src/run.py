@@ -15,6 +15,7 @@ import ants
 
 # Import local modules
 from src.antspy.wrapper import ANTsSegmentation
+from src.antspy.inputs import DEFAULT_MAX_VOXEL_SIZE, bids_relative, choose_anat_input
 
 # Version of the BIDS *specification* these derivatives claim conformance to.
 # Must never be derived from a library version: pkg_resources.get_distribution
@@ -24,7 +25,7 @@ BIDS_VERSION = "1.8.0"
 
 # App version. Kept in one place: initialize(), --version, and the per-subject
 # processing_summary.json all read it.
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 def setup_logger(log_dir, verbose=False):
     """Set up logging configuration."""
@@ -138,13 +139,23 @@ def get_version_info(app_version):
     }
 
 
+def _failure_reason(segmenter):
+    reason = getattr(segmenter, 'last_failure_reason', None)
+    return reason if isinstance(reason, str) else None
+
+
 def save_processing_summary(logger, subject_dir, bids_subject, bids_session,
-                            app_version, succeeded, nidm_written):
+                            app_version, succeeded, nidm_written,
+                            bids_dir=None, anat_choice=None, failure_reason=None):
     """Write processing_summary.json inside the subject directory.
 
     BABS zips only sub-<id>/, so anything written outside it is dropped from the
     delivered derivative -- which is why this goes in the subject dir and not the
     derivative root. Same file the freesurfer-nidm app ships per subject.
+
+    ``anat_choice`` is choose_anat_input's result: the image segmented, the
+    fine-enough images not used, and those skipped as too coarse (with their
+    voxel sizes), all relative to ``bids_dir``.
     """
     subject_label = f"sub-{bids_subject}"
     if bids_session:
@@ -161,6 +172,14 @@ def save_processing_summary(logger, subject_dir, bids_subject, bids_session,
         "nidm_written": nidm_written,
         "version_info": get_version_info(app_version),
     }
+    if anat_choice is not None:
+        if anat_choice.chosen is not None:
+            summary["input_file"] = bids_relative(anat_choice.chosen, bids_dir)
+        summary["inputs_not_used"] = [bids_relative(p, bids_dir) for p in anat_choice.not_used]
+        summary["inputs_too_coarse"] = {
+            bids_relative(p, bids_dir): list(z) for p, z in anat_choice.too_coarse}
+    if failure_reason:
+        summary["failure_reason"] = failure_reason
 
     try:
         subject_dir = Path(subject_dir)
@@ -216,8 +235,9 @@ def parse_arguments():
                         type=float, default=0.5)
     
     # Segmentation method
-    parser.add_argument('--method', help='Segmentation method to use [default: fusion]',
-                        choices=['quick', 'fusion'], default='fusion')
+    parser.add_argument('--method', help='Segmentation method to use [default: fusion]. '
+                        'With --skip-ants, required: the method that produced --ants-input',
+                        choices=['quick', 'fusion'], default=None)
     
     parser.add_argument('--skip-bids-validation', help='Skip BIDS validation step',
                         action='store_true')
@@ -234,17 +254,50 @@ def parse_arguments():
     
     parser.add_argument('--num-threads', help='Number of threads to use for processing [default: 1]',
                         type=int, default=1)
+
+    # Registration runs on FireANTs (GPU). --device cuda with no visible GPU
+    # fails before any processing rather than falling back: FireANTs on CPU is
+    # slower than the ANTs code it replaced, so a silent fallback under a BABS
+    # array yields hundreds of many-hour jobs that all exit 0.
+    parser.add_argument('--device', help='Compute device for registration [default: cuda]',
+                        choices=['cuda', 'cpu'], default='cuda')
+    parser.add_argument('--fireants-batch-size', dest='fireants_batch_size',
+                        help='Atlases registered per batch under --method fusion; 0 registers '
+                             'all at once [default: 5]. All twenty at once needs more than 80 GB '
+                             'of GPU memory (tier-2 OOM on an A100 80GB, 2026-09-07), so the '
+                             'default is sized to fit a 40 GB card',
+                        type=int, default=5)
+    # Without built fused_ops, or on CPU, genericlabel degrades to a one-hot
+    # return that warp_atlases argmaxes; see fireants/io/image.py:145-147.
+    parser.add_argument('--label-interpolation', dest='label_interpolation',
+                        help='Atlas label warping method [default: genericlabel]',
+                        choices=['genericlabel', 'nearest'], default='genericlabel')
+    parser.add_argument('--max-voxel-size', dest='max_voxel_size', type=float,
+                        default=DEFAULT_MAX_VOXEL_SIZE,
+                        help='Skip input images with any voxel dimension above this, in mm; '
+                             'fail the subject if none is fine enough '
+                             f'[default: {DEFAULT_MAX_VOXEL_SIZE}]')
+
     parser.add_argument('-v', '--verbose', help='Verbose output',
                         action='store_true')
     parser.add_argument('--version', action='version',
                         version=f'ANTs BIDS App v{APP_VERSION}')
-    
+
     args = parser.parse_args()
-    
+
     # Validate arguments
     if args.skip_ants and not args.ants_input:
         parser.error("--skip-ants requires --ants-input to specify existing ANTs derivatives")
-    
+    if args.method is None:
+        # The two methods number structures differently (LABEL_PROTOCOL_BY_METHOD),
+        # and nothing in existing derivatives records which one made them.
+        if args.skip_ants:
+            parser.error("--skip-ants requires --method: the method that produced "
+                         "--ants-input decides how its label ids are named")
+        args.method = 'fusion'
+    if args.fireants_batch_size < 0:
+        parser.error("--fireants-batch-size must be >= 0 (0 means all atlases at once)")
+
     return args
 
 def initialize(args):
@@ -296,13 +349,32 @@ def initialize(args):
             modality=args.modality,
             prob_threshold=args.prob_threshold,
             num_threads=args.num_threads,
-            verbose=args.verbose
+            verbose=args.verbose,
+            device=args.device,
+            fireants_batch_size=args.fireants_batch_size,
+            label_interpolation=args.label_interpolation,
+            max_voxel_size=getattr(args, 'max_voxel_size', DEFAULT_MAX_VOXEL_SIZE),
         )
 
     return layout, segmenter, derivatives_dir, nidm_input_dir
 
+#: Which label protocol each --method's segmentation is numbered in.
+#:
+#: These are not interchangeable and the difference is invisible downstream.
+#: ``fusion`` votes over the OASIS-TRT-20 DKT31_CMA atlases, whose subcortical
+#: ids follow the Neuromorphometrics/BrainCOLOR protocol; ``quick`` warps a
+#: template map numbered in FreeSurfer aseg ids. Both occupy the same numeric
+#: range, so naming one with the other's table yields a valid NIDM file full of
+#: wrong structures -- see src/antspy/label_vocabulary.py.
+LABEL_PROTOCOL_BY_METHOD = {
+    "fusion": "neuromorphometrics",
+    "quick": "freesurfer",
+}
+
+
 def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
-                    bids_session=None, verbose=False, input_file=None):
+                    bids_session=None, verbose=False, input_file=None,
+                    method=None):
     """Convert ANTs segmentation outputs to NIDM format.
 
     Writes ``nidm.ttl`` (and the shared ``ants_cde.ttl`` vocabulary, which
@@ -319,6 +391,10 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
         bids_session (str): Session label (without "ses-" prefix)
         verbose (bool): Enable verbose output
         input_file (str or Path): Path to the input T1w file
+        method (str or None): Segmentation method that produced the stats, used
+            to pick the label protocol the converter names structures with. An
+            unrecognised or absent method falls back to FreeSurfer, which is
+            what every caller got before the protocol existed.
     Returns:
         bool: True if conversion succeeded, False otherwise
     """
@@ -376,6 +452,17 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
             "-o", nidm_output_str
         ]
 
+        label_protocol = LABEL_PROTOCOL_BY_METHOD.get(method)
+        if label_protocol is None:
+            if method is not None:
+                logger.warning(
+                    f"No label protocol registered for method {method!r}; naming "
+                    "structures with the FreeSurfer table. If this method does not "
+                    "emit FreeSurfer aseg ids the structure names will be wrong."
+                )
+        else:
+            cmd.extend(["--label-protocol", label_protocol])
+
         # Add existing NIDM file if available
         if existing_nidm_file:
             cmd.extend(["--nidm", str(existing_nidm_file.absolute()), "--forcenidm"])
@@ -412,7 +499,17 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
         return False
 
 def process_participant(args, logger):
-    """Run the participant level analysis for single-session datasets."""
+    """Run the participant level analysis, including BABS session-wise jobs.
+
+    BABS always passes the positional level `participant`, even for a project
+    initialised at the session level, and supplies the session as
+    --session-label. That combination is a session job, so it goes to
+    process_session; without a session label this is a single-session run.
+    """
+    if args.session_label:
+        logger.info("Session label given with participant level; processing that session")
+        return process_session(args, logger)
+
     logger.info("Starting participant level analysis (single-session dataset)")
 
     # Initialize app
@@ -454,16 +551,17 @@ def process_participant(args, logger):
             success = False
             logger.error(f"Segmentation failed for subject {participant_label}")
     
+    anat_choice = choose_anat_input(args.bids_dir, bids_subject, bids_session,
+                                    suffix=args.modality,
+                                    max_voxel_size=getattr(args, 'max_voxel_size', DEFAULT_MAX_VOXEL_SIZE))
+    input_file = anat_choice.chosen
+
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)
     if success and not args.skip_nidm:
         # Find NIDM input file for this subject (no session for participant level)
         nidm_input_file = find_nidm_input_file(nidm_input_dir, bids_subject, session_id=None)
         if nidm_input_file:
             logger.info(f"Found NIDM input file: {nidm_input_file}")
-
-        # Get input file path for NIDM conversion (single session)
-        input_path = layout.get(subject=bids_subject, suffix=args.modality, extension='nii.gz')
-        input_file = input_path[0].path if input_path else None
 
         success = nidm_conversion(
             logger=logger,
@@ -473,6 +571,7 @@ def process_participant(args, logger):
             bids_session=bids_session,
             verbose=args.verbose,
             input_file=input_file,
+            method=args.method,
         )
     
     save_processing_summary(
@@ -483,6 +582,9 @@ def process_participant(args, logger):
         app_version=APP_VERSION,
         succeeded=success,
         nidm_written=(not args.skip_nidm) and success,
+        bids_dir=args.bids_dir,
+        anat_choice=anat_choice,
+        failure_reason=_failure_reason(segmenter),
     )
 
     logger.info(f"Participant level analysis complete. Processing {'succeeded' if success else 'failed'}")
@@ -552,16 +654,17 @@ def process_session(args, logger):
             success = False
             logger.error(f"Segmentation failed for session {session_label}")
     
+    anat_choice = choose_anat_input(args.bids_dir, bids_subject, bids_session,
+                                    suffix=args.modality,
+                                    max_voxel_size=getattr(args, 'max_voxel_size', DEFAULT_MAX_VOXEL_SIZE))
+    input_file = anat_choice.chosen
+
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)
     if success and not args.skip_nidm:
         # Find NIDM input file for this subject and session
         nidm_input_file = find_nidm_input_file(nidm_input_dir, bids_subject, session_id=bids_session)
         if nidm_input_file:
             logger.info(f"Found NIDM input file: {nidm_input_file}")
-
-        # Get input file path for NIDM conversion
-        input_path = layout.get(subject=bids_subject, session=bids_session, suffix=args.modality, extension='nii.gz')
-        input_file = input_path[0].path if input_path else None
 
         success = nidm_conversion(
             logger=logger,
@@ -571,6 +674,7 @@ def process_session(args, logger):
             bids_session=bids_session,
             verbose=args.verbose,
             input_file=input_file,
+            method=args.method,
         )
     
     save_processing_summary(
@@ -581,6 +685,9 @@ def process_session(args, logger):
         app_version=APP_VERSION,
         succeeded=success,
         nidm_written=(not args.skip_nidm) and success,
+        bids_dir=args.bids_dir,
+        anat_choice=anat_choice,
+        failure_reason=_failure_reason(segmenter),
     )
 
     logger.info(f"Session level analysis complete. Processing {'succeeded' if success else 'failed'}")
