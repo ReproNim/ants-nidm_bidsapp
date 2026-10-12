@@ -25,7 +25,7 @@ BIDS_VERSION = "1.8.0"
 
 # App version. Kept in one place: initialize(), --version, and the per-subject
 # processing_summary.json all read it.
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 def setup_logger(log_dir, verbose=False):
     """Set up logging configuration."""

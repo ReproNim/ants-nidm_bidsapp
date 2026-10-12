@@ -17,7 +17,7 @@ def _config():
 
 
 def test_zips_each_subject_folder():
-    assert _config()["zip_foldernames"] == {"${subid}": "0-1-0"}
+    assert _config()["zip_foldernames"] == {"${subid}": "0-2-0"}
 
 
 def test_requests_a_gpu():
