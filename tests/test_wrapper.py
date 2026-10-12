@@ -67,7 +67,7 @@ class TestANTsSegmentation(unittest.TestCase):
             }
             
             # Initialize segmenter
-            # device='cpu' is deliberate and load-bearing, not a default worth
+            # device='cpu' is deliberate and required, not a default worth
             # "helpfully" removing: these tests exercise segmentation logic on
             # mocks and never touch a GPU, while the production default is
             # 'cuda' (see ANTsSegmentation.__init__ and resolve_device). The
