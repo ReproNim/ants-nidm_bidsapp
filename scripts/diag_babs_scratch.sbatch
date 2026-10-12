@@ -51,13 +51,16 @@ fail=0
 grep -q "TMPDIR scratch .* using /out/tmp" "${OUT}/app.log" \
     && echo "OK fallback warning logged" || { echo "FAIL no fallback warning"; fail=1; }
 for f in nidm.ttl ants_cde.ttl "stats/${STEM}_antsbrainvols.csv" "stats/${STEM}_antslabelstats.csv" \
-         "anat/${STEM}_space-orig_dseg.nii.gz"; do
+         "anat/${STEM}_space-orig_dseg.nii.gz" "anat/${STEM}_space-orig_dseg.json"; do
     test -s "${SUBDIR}/${f}" && echo "OK ${f}" || { echo "FAIL missing ${f}"; fail=1; }
 done
 if [[ -n "$NIDM" ]]; then
     grep -q "Found NIDM input file" "${OUT}/app.log" \
         && echo "OK NIDM input used" || { echo "FAIL NIDM input not found"; fail=1; }
 fi
+grep -q '"input_file"' "${SUBDIR}/processing_summary.json" 2>/dev/null \
+    && echo "OK input recorded: $(grep -o '"input_file": "[^"]*"' "${SUBDIR}/processing_summary.json")" \
+    || { echo "FAIL input_file missing from processing_summary.json"; fail=1; }
 grep -qi "no space left" "${OUT}/app.log" && { echo "FAIL ENOSPC in log"; fail=1; } || echo "OK no ENOSPC"
 echo "left in ${OUT}/tmp (outside sub-${SUB}/, so not in the BABS zip):"
 du -sh "${OUT}/tmp" 2>/dev/null || echo "  none"
