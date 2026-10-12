@@ -52,7 +52,12 @@ jobs:
         df -h
     - name: Build Docker image
       run: |
-        docker build -t ants-nidm_bidsapp:ci .
+        docker build --build-arg GIT_COMMIT=${{ github.event.pull_request.head.sha || github.sha }} -t ants-nidm_bidsapp:ci .
+    - name: Check the image records its commit
+      run: |
+        rev=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' ants-nidm_bidsapp:ci)
+        echo "org.opencontainers.image.revision=$rev"
+        test "$rev" = "${{ github.event.pull_request.head.sha || github.sha }}"
     - name: Smoke-test entrypoint
       run: |
         docker run --rm ants-nidm_bidsapp:ci --version

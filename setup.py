@@ -12,11 +12,34 @@ DOCKER_IMAGE = f"{DOCKER_IMAGE_NAME}:{DOCKER_IMAGE_TAG}"
 SINGULARITY_IMAGE_NAME = f"{DOCKER_IMAGE_NAME}.sif"
 
 
+def git_revision():
+    """Commit of the working tree, with "-dirty" if tracked files differ from it.
+
+    Stamped into the image as org.opencontainers.image.revision.
+    """
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                             text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    dirty = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"]).returncode != 0
+    return sha + ("-dirty" if dirty else "")
+
+
+def commit_build_arg():
+    """The --build-arg that sets the image's revision label."""
+    return ["--build-arg", f"GIT_COMMIT={git_revision()}"]
+
+
+# Shown in the manual build commands printed below.
+BUILD_ARG_HINT = "--build-arg GIT_COMMIT=$(git rev-parse HEAD)"
+
+
 def build_docker():
     """Build Docker container"""
     print("Building Docker image...")
     try:
-        subprocess.run(["docker", "build", "-t", DOCKER_IMAGE, "."], check=True)
+        subprocess.run(["docker", "build", *commit_build_arg(), "-t", DOCKER_IMAGE, "."], check=True)
         print(f"Docker image built successfully: {DOCKER_IMAGE}")
     except subprocess.CalledProcessError as e:
         print(f"Docker build failed: {e}")
@@ -66,7 +89,7 @@ def build_singularity(output_path=None):
         ):
             print("\nDetected Apptainer on cluster environment.")
             print("For cluster environments, please build directly with apptainer:")
-            print(f"apptainer build --fakeroot {SINGULARITY_IMAGE_NAME} Singularity\n")
+            print(f"apptainer build --fakeroot {BUILD_ARG_HINT} {SINGULARITY_IMAGE_NAME} Singularity\n")
             return False
         elif (
             subprocess.run(["which", "singularity"], capture_output=True).returncode == 0
@@ -81,7 +104,7 @@ def build_singularity(output_path=None):
         output_file = str(Path(output_file).resolve())
         
         # Build command
-        cmd = [container_cmd, "build"]
+        cmd = [container_cmd, "build", *commit_build_arg()]
         
         # For regular Singularity installations, try fakeroot if available
         if subprocess.run(["which", "fakeroot"], capture_output=True).returncode == 0:
@@ -99,9 +122,9 @@ def build_singularity(output_path=None):
     except subprocess.CalledProcessError as e:
         print(f"Build failed: {e}")
         print("\nFor cluster environments, please build directly with apptainer:")
-        print(f"apptainer build --remote {SINGULARITY_IMAGE_NAME} Singularity")
+        print(f"apptainer build --remote {BUILD_ARG_HINT} {SINGULARITY_IMAGE_NAME} Singularity")
         print("or")
-        print(f"apptainer build --fakeroot {SINGULARITY_IMAGE_NAME} Singularity")
+        print(f"apptainer build --fakeroot {BUILD_ARG_HINT} {SINGULARITY_IMAGE_NAME} Singularity")
         return False
 
 
@@ -133,7 +156,7 @@ def print_usage():
     print("\nOther Commands:")
     print("  python setup.py --init-git       - Initialize git submodules")
     print("\nNote: For HPC environments without Docker, use 'singularity' command directly:")
-    print(f"  apptainer build --fakeroot {SINGULARITY_IMAGE_NAME} Singularity")
+    print(f"  apptainer build --fakeroot {BUILD_ARG_HINT} {SINGULARITY_IMAGE_NAME} Singularity")
     print("\nFor more information, run: python setup.py --help")
 
 
