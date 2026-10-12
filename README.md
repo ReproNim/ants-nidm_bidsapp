@@ -104,7 +104,7 @@ This BIDS App follows standard BIDS Apps practices with a Dockerfile as the prim
 python setup.py docker
 
 # Or directly with Docker
-docker build -t ants-nidm_bidsapp:latest .
+docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) -t ants-nidm_bidsapp:latest .
 
 # Save for transfer to HPC (if needed)
 docker save ants-nidm_bidsapp:latest -o ants-nidm_bidsapp.tar
@@ -115,7 +115,7 @@ docker save ants-nidm_bidsapp:latest -o ants-nidm_bidsapp.tar
 ```bash
 # Direct build from Singularity definition file
 # The --fakeroot flag is required on HPC systems without root access
-apptainer build --fakeroot ants-nidm_bidsapp.sif Singularity
+apptainer build --fakeroot --build-arg GIT_COMMIT=$(git rev-parse HEAD) ants-nidm_bidsapp.sif Singularity
 
 # Or using the setup.py helper
 python setup.py singularity

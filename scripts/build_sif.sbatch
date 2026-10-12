@@ -46,13 +46,16 @@ echo "branch:  $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD
 echo "submod:  $(git submodule status | awk '{print $1, $2}')"
 echo "dirty:   $(git status --porcelain | grep -v '^?? logs/' || echo none)"
 echo "output:  $OUT"
+# Stamped into the image as org.opencontainers.image.revision.
+GIT_COMMIT="$(git rev-parse HEAD)$(git diff --quiet HEAD -- || echo -dirty)"
+echo "commit:  $GIT_COMMIT"
 echo "started: $(date -Is)"
 apptainer --version
 
 # Build to a partial name so an interrupted job never leaves a plausible .sif.
 PARTIAL="${OUT}.partial"
 rm -f "$PARTIAL"
-apptainer build --fakeroot "$PARTIAL" Singularity
+apptainer build --fakeroot --build-arg GIT_COMMIT="$GIT_COMMIT" "$PARTIAL" Singularity
 mv "$PARTIAL" "$OUT"
 echo "built:   $(date -Is)  $(du -h "$OUT" | cut -f1)"
 
@@ -60,6 +63,9 @@ echo "built:   $(date -Is)  $(du -h "$OUT" | cut -f1)"
 # so a finished SIF implies it passed; re-check from outside anyway, plus the
 # other things tier 2 will need. None of this needs a GPU.
 echo "=== post-build checks ==="
+rev=$(apptainer inspect --labels "$OUT" | awk '$1 == "org.opencontainers.image.revision:" {print $2}')
+echo "revision label: $rev"
+test "$rev" = "$GIT_COMMIT"
 apptainer exec "$OUT" python3 -c "import torch, fireants_fused_ops; print('fused ops OK (post-build)')"
 # FFO_AVAILABLE is the flag src/registration/fireants.py reads at runtime to
 # decide between the fused generic-label sampler and the one-hot fallback, so
