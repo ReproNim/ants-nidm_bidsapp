@@ -6,8 +6,8 @@
 #
 # The repo's src/ is bound over the container's, so this runs the working-tree
 # code rather than whatever the SIF was built from.
+# No partition is set here: pass one with `sbatch -p <partition>`.
 #SBATCH --job-name=diag-dump-warped
-#SBATCH --partition=pi_satra
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G

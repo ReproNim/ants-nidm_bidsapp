@@ -134,7 +134,7 @@ def test_base_image_ships_the_cuda_toolkit(text, name):
 @pytest.mark.parametrize("text,name", BUILD_FILES, ids=BUILD_IDS)
 def test_cuda_arch_list_names_the_target_gpus(text, name):
     """The build host has no GPU, so nvcc cannot autodetect an architecture.
-    Deployment is A100 (sm_80) and H100 (sm_90) on pi_satra.
+    Deployment targets are A100 (sm_80) and H100 (sm_90).
     """
     match = re.search(r'TORCH_CUDA_ARCH_LIST="([^"]+)"', text)
     assert match, f"{name} must set TORCH_CUDA_ARCH_LIST for a GPU-less build host"

@@ -14,8 +14,8 @@
 # without rebuilding the SIF. It is a copy, not the live tree: the NIDM
 # conversion and the second method start long after the first, and edits made
 # in between would otherwise run a mix of old and new code.
+# No partition is set here: pass one with `sbatch -p <partition>`.
 #SBATCH --job-name=ants-fireants-tier2
-#SBATCH --partition=pi_satra
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G

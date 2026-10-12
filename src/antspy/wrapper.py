@@ -225,7 +225,7 @@ class ANTsSegmentation:
         the sbatch harnesses) that is real disk. Without one it is either
         read-only (plain `apptainer run`) or, under --writable-tmpfs as BABS
         runs it, an overlay capped by Apptainer's "sessiondir max size"
-        (64 MiB on ORCD), where the warps fail with ENOSPC mid-subject.
+        (64 MiB is a common site setting), where the warps fail with ENOSPC mid-subject.
         """
         try:
             candidate.mkdir(parents=True, exist_ok=True)

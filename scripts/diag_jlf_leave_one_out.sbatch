@@ -8,8 +8,8 @@
 # A copy of the repo's src/ taken when the task starts is bound over the
 # container's /opt/src, so the harness and the fusion it measures come from the
 # same commit, which the log records.
+# No partition is set here: pass one with `sbatch -p <partition>`.
 #SBATCH --job-name=diag-jlf-loo
-#SBATCH --partition=pi_satra
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G

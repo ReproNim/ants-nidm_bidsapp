@@ -3,8 +3,8 @@
 #
 # Usage:
 #   sbatch scripts/diag_jlf_param_sweep.sbatch <sif> <dump_dir> <out_dir>
+# No partition is set here: pass one with `sbatch -p <partition>`.
 #SBATCH --job-name=diag-jlf-sweep
-#SBATCH --partition=pi_satra
 #SBATCH --array=0-6
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

@@ -20,7 +20,7 @@ ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=/usr/local/cuda/bin:$PATH
 # The build host has no GPU, so nvcc cannot autodetect an architecture and
 # torch falls back to compiling for whatever it guesses. Name the deployment
-# targets explicitly: A100 (sm_80) and H100 (sm_90) on pi_satra.
+# targets explicitly: A100 (sm_80) and H100 (sm_90).
 ENV TORCH_CUDA_ARCH_LIST="8.0;9.0"
 
 # Install system dependencies
