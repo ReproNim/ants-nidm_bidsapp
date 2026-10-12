@@ -231,8 +231,6 @@ def parse_arguments():
                         help='The label of the session that should be analyzed. The label corresponds to ses-<session_label> from the BIDS spec (with or without "ses-" prefix).')
     parser.add_argument('--modality', help='Modality to process [default: T1w]',
                         default='T1w')
-    parser.add_argument('--prob-threshold', help='Probability threshold for binary mask creation [default: 0.5]',
-                        type=float, default=0.5)
     
     # Segmentation method
     parser.add_argument('--method', help='Segmentation method to use [default: fusion]. '
@@ -347,7 +345,6 @@ def initialize(args):
             bids_dir=str(args.bids_dir),
             output_dir=str(derivatives_dir),
             modality=args.modality,
-            prob_threshold=args.prob_threshold,
             num_threads=args.num_threads,
             verbose=args.verbose,
             device=args.device,

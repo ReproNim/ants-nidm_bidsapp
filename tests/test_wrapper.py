@@ -79,7 +79,6 @@ class TestANTsSegmentation(unittest.TestCase):
                 output_dir=str(self.output_dir),
                 temp_dir=str(self.temp_path),
                 modality='T1w',
-                prob_threshold=0.5,
                 num_threads=1,
                 device='cpu',
                 verbose=True
@@ -96,7 +95,6 @@ class TestANTsSegmentation(unittest.TestCase):
         self.assertEqual(str(self.segmenter.output_dir), str(self.output_dir))
         self.assertEqual(str(self.segmenter.temp_dir), str(self.temp_path))
         self.assertEqual(self.segmenter.modality, 'T1w')
-        self.assertEqual(self.segmenter.prob_threshold, 0.5)
         self.assertEqual(self.segmenter.num_threads, 1)
     
     def test_load_image(self):
@@ -1043,7 +1041,6 @@ class TestANTsSegmentation(unittest.TestCase):
                     output_dir=str(self.output_dir),
                     temp_dir=str(self.temp_path),
                     modality='T1w',
-                    prob_threshold=0.5,
                     num_threads=1,
                     device='cuda',
                     verbose=True
