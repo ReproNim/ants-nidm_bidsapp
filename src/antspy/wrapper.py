@@ -1,4 +1,5 @@
 # src/ants/wrapper.py
+import json
 import os
 import shutil
 import subprocess
@@ -16,7 +17,7 @@ from natsort import natsorted
 
 from src.registration import apply_warp, build_label_map, register_to_template, warp_atlases
 from src.registration.device import resolve_device
-from src.antspy.inputs import select_anat_input
+from src.antspy.inputs import bids_relative, select_anat_input
 
 #: Registration scratch for one subject is ~1-2 GB; below this much free
 #: space under $TMPDIR the app uses output_dir/tmp instead.
@@ -681,9 +682,13 @@ class ANTsSegmentation:
             # Organize outputs in BIDS format
             volumes = self._organize_bids_output(segmentation, bids_subject, bids_session)
             
-            # Add input T1w file information if provided
+            # Add input T1w file information if provided, and record it in the
+            # dseg sidecar as a BIDS Sources entry
             if input_t1w:
                 volumes['input_t1w'] = str(input_t1w)
+                sidecar = Path(volumes['segmentation'].replace('.nii.gz', '.json'))
+                rel = bids_relative(input_t1w, self.bids_dir)
+                sidecar.write_text(json.dumps({"Sources": [f"bids:raw:{rel}"]}, indent=2) + "\n")
             
             # Add template and atlas information
             volumes['templates'] = {

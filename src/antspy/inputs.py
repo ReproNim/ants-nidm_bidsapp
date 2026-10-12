@@ -42,8 +42,8 @@ def _rank(item):
             int(run) if run.isdigit() else float("inf"), path.name)
 
 
-def select_anat_input(bids_dir, subject, session=None, suffix="T1w", logger=None):
-    """Return the image to segment for one subject/session, or None.
+def rank_anat_inputs(bids_dir, subject, session=None, suffix="T1w"):
+    """Every matching image for one subject/session, best first; [] if none.
 
     ``subject`` and ``session`` are BIDS labels without their ``sub-``/``ses-``
     prefixes.
@@ -53,14 +53,25 @@ def select_anat_input(bids_dir, subject, session=None, suffix="T1w", logger=None
         anat_dir = anat_dir / f"ses-{session}"
     anat_dir = anat_dir / "anat"
     if not anat_dir.is_dir():
-        return None
+        return []
+    return [path for path, _ in sorted(_candidates(anat_dir, subject, session, suffix), key=_rank)]
 
-    ranked = sorted(_candidates(anat_dir, subject, session, suffix), key=_rank)
+
+def select_anat_input(bids_dir, subject, session=None, suffix="T1w", logger=None):
+    """Return the image to segment for one subject/session, or None."""
+    ranked = rank_anat_inputs(bids_dir, subject, session, suffix)
     if not ranked:
         return None
-    chosen = ranked[0][0]
     if logger is not None:
-        logger.info(f"{suffix} input: {chosen.name}")
-        for path, _ in ranked[1:]:
+        logger.info(f"{suffix} input: {ranked[0].name}")
+        for path in ranked[1:]:
             logger.info(f"  not used: {path.name}")
-    return chosen
+    return ranked[0]
+
+
+def bids_relative(path, bids_dir):
+    """``path`` relative to the BIDS root as a POSIX string, else its name."""
+    try:
+        return Path(path).relative_to(Path(bids_dir)).as_posix()
+    except ValueError:
+        return Path(path).name

@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.antspy.inputs import select_anat_input  # noqa: E402
+from src.antspy.inputs import rank_anat_inputs, select_anat_input  # noqa: E402
 
 
 def _touch(anat, *names):
@@ -73,3 +73,11 @@ def test_both_nifti_extensions(tmp_path, ext):
     anat = tmp_path / "sub-01" / "anat"
     _touch(anat, f"sub-01_T1w{ext}")
     assert select_anat_input(tmp_path, "01").name == f"sub-01_T1w{ext}"
+
+
+def test_rank_lists_all_candidates_best_first(tmp_path):
+    anat = tmp_path / "sub-01" / "ses-1" / "anat"
+    _touch(anat, "sub-01_ses-1_acq-hires_run-1_T1w.nii.gz", "sub-01_ses-1_run-1_T1w.nii.gz")
+    assert [p.name for p in rank_anat_inputs(tmp_path, "01", "1")] == [
+        "sub-01_ses-1_run-1_T1w.nii.gz", "sub-01_ses-1_acq-hires_run-1_T1w.nii.gz"]
+    assert rank_anat_inputs(tmp_path, "02", "1") == []

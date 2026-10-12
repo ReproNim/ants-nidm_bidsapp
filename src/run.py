@@ -15,7 +15,7 @@ import ants
 
 # Import local modules
 from src.antspy.wrapper import ANTsSegmentation
-from src.antspy.inputs import select_anat_input
+from src.antspy.inputs import bids_relative, rank_anat_inputs
 
 # Version of the BIDS *specification* these derivatives claim conformance to.
 # Must never be derived from a library version: pkg_resources.get_distribution
@@ -140,12 +140,17 @@ def get_version_info(app_version):
 
 
 def save_processing_summary(logger, subject_dir, bids_subject, bids_session,
-                            app_version, succeeded, nidm_written):
+                            app_version, succeeded, nidm_written,
+                            bids_dir=None, anat_inputs=None):
     """Write processing_summary.json inside the subject directory.
 
     BABS zips only sub-<id>/, so anything written outside it is dropped from the
     delivered derivative -- which is why this goes in the subject dir and not the
     derivative root. Same file the freesurfer-nidm app ships per subject.
+
+    ``anat_inputs`` is rank_anat_inputs' list: the first entry is the image
+    segmented, the rest were present and not used. Both are recorded relative
+    to ``bids_dir``.
     """
     subject_label = f"sub-{bids_subject}"
     if bids_session:
@@ -162,6 +167,9 @@ def save_processing_summary(logger, subject_dir, bids_subject, bids_session,
         "nidm_written": nidm_written,
         "version_info": get_version_info(app_version),
     }
+    if anat_inputs:
+        summary["input_file"] = bids_relative(anat_inputs[0], bids_dir)
+        summary["inputs_not_used"] = [bids_relative(p, bids_dir) for p in anat_inputs[1:]]
 
     try:
         subject_dir = Path(subject_dir)
@@ -527,15 +535,16 @@ def process_participant(args, logger):
             success = False
             logger.error(f"Segmentation failed for subject {participant_label}")
     
+    anat_inputs = rank_anat_inputs(args.bids_dir, bids_subject, bids_session,
+                                   suffix=args.modality)
+    input_file = anat_inputs[0] if anat_inputs else None
+
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)
     if success and not args.skip_nidm:
         # Find NIDM input file for this subject (no session for participant level)
         nidm_input_file = find_nidm_input_file(nidm_input_dir, bids_subject, session_id=None)
         if nidm_input_file:
             logger.info(f"Found NIDM input file: {nidm_input_file}")
-
-        # Get input file path for NIDM conversion (single session)
-        input_file = select_anat_input(args.bids_dir, bids_subject, suffix=args.modality)
 
         success = nidm_conversion(
             logger=logger,
@@ -556,6 +565,8 @@ def process_participant(args, logger):
         app_version=APP_VERSION,
         succeeded=success,
         nidm_written=(not args.skip_nidm) and success,
+        bids_dir=args.bids_dir,
+        anat_inputs=anat_inputs,
     )
 
     logger.info(f"Participant level analysis complete. Processing {'succeeded' if success else 'failed'}")
@@ -625,16 +636,16 @@ def process_session(args, logger):
             success = False
             logger.error(f"Segmentation failed for session {session_label}")
     
+    anat_inputs = rank_anat_inputs(args.bids_dir, bids_subject, bids_session,
+                                   suffix=args.modality)
+    input_file = anat_inputs[0] if anat_inputs else None
+
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)
     if success and not args.skip_nidm:
         # Find NIDM input file for this subject and session
         nidm_input_file = find_nidm_input_file(nidm_input_dir, bids_subject, session_id=bids_session)
         if nidm_input_file:
             logger.info(f"Found NIDM input file: {nidm_input_file}")
-
-        # Get input file path for NIDM conversion
-        input_file = select_anat_input(args.bids_dir, bids_subject, bids_session,
-                                       suffix=args.modality)
 
         success = nidm_conversion(
             logger=logger,
@@ -655,6 +666,8 @@ def process_session(args, logger):
         app_version=APP_VERSION,
         succeeded=success,
         nidm_written=(not args.skip_nidm) and success,
+        bids_dir=args.bids_dir,
+        anat_inputs=anat_inputs,
     )
 
     logger.info(f"Session level analysis complete. Processing {'succeeded' if success else 'failed'}")

@@ -525,6 +525,23 @@ class TestANTsSegmentation(unittest.TestCase):
             mock_segment.assert_called_once()
             mock_save.assert_called_once()
 
+    def test_save_results_writes_dseg_sidecar_with_source(self):
+        """The dseg sidecar names the T1w it was computed from (BIDS Sources)."""
+        import json
+        anat = self.bids_dir / "sub-01" / "ses-1" / "anat"
+        anat.mkdir(parents=True, exist_ok=True)
+        t1 = anat / "sub-01_ses-1_run-1_T1w.nii.gz"
+        seg = MagicMock()
+        seg.numpy.return_value = np.ones((2, 2, 2))
+        seg.spacing = (1.0, 1.0, 1.0)
+        with patch('ants.image_write'):
+            result = self.segmenter.save_results(
+                {'segmentation': seg, 'probabilityimages': [], 'BrainExtractionMask': seg},
+                "01", "1", input_t1w=str(t1))
+        sidecar = Path(result['segmentation'].replace('.nii.gz', '.json'))
+        self.assertEqual(json.loads(sidecar.read_text())["Sources"],
+                         ["bids:raw:sub-01/ses-1/anat/sub-01_ses-1_run-1_T1w.nii.gz"])
+
     def test_run_subject_session_with_run_entity(self):
         """ABIDE II longitudinal names (sub-X_ses-N_run-1_T1w) must be found,
         and the standard acquisition chosen over acq-hires."""

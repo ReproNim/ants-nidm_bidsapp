@@ -796,6 +796,27 @@ class TestRun(unittest.TestCase):
         self.assertEqual(summary["failure_list"], ["sub-01_ses-baseline"])
         self.assertFalse(summary["nidm_written"])
 
+    def test_processing_summary_records_the_input_used(self):
+        """The segmented image and any skipped alternatives are recorded,
+        relative to the BIDS root."""
+        bids = Path(self.temp_dir) / "bids_inputs"
+        anat = bids / "sub-01" / "ses-1" / "anat"
+        anat.mkdir(parents=True)
+        used = anat / "sub-01_ses-1_run-1_T1w.nii.gz"
+        other = anat / "sub-01_ses-1_acq-hires_run-1_T1w.nii.gz"
+        path = save_processing_summary(
+            logger=self.logger,
+            subject_dir=subject_output_dir(self.output_dir, "01", "1"),
+            bids_subject="01", bids_session="1", app_version=APP_VERSION,
+            succeeded=True, nidm_written=True,
+            bids_dir=bids, anat_inputs=[used, other],
+        )
+        with open(path) as f:
+            summary = json.load(f)
+        self.assertEqual(summary["input_file"], "sub-01/ses-1/anat/sub-01_ses-1_run-1_T1w.nii.gz")
+        self.assertEqual(summary["inputs_not_used"],
+                         ["sub-01/ses-1/anat/sub-01_ses-1_acq-hires_run-1_T1w.nii.gz"])
+
     def test_subject_output_dir(self):
         """Per-subject output dir is the zip unit: no app wrapper, no nidm/."""
         self.assertEqual(str(subject_output_dir("/out", "01")), "/out/sub-01")
