@@ -10,6 +10,7 @@ src/
 ├── run.py                  # CLI, BIDS layout, participant/session dispatch, NIDM call
 ├── antspy/
 │   ├── wrapper.py          # ANTsSegmentation: preprocessing, both methods, outputs
+│   ├── inputs.py           # which T1w to segment when there are several
 │   └── label_vocabulary.py # Neuromorphometrics <-> FreeSurfer aseg bijection
 ├── registration/           # the FireANTs boundary
 │   ├── fireants.py         # warp_atlases, register_to_template, apply_warp
@@ -100,6 +101,16 @@ record which method made them.
 `label_vocabulary.py` holds the 37-entry bijection between the two tables.
 `scripts/diag_label_vocabulary_correspondence.py` re-derives it from the
 atlases and exits non-zero if an entry stops reproducing.
+
+## Input selection
+
+`inputs.rank_anat_inputs` lists every image of the requested suffix for one
+subject/session, allowing optional entities (`acq-`, `run-`, ...), and orders
+them; `select_anat_input` takes the first. `run_subject` and `run.py` both go
+through it, so the segmented file and the recorded one cannot differ. The
+order (no `acq-`, then no other entities, then lowest run, then name) is
+documented for users in the README; change both together. The chosen file is
+written to `processing_summary.json` and to the dseg sidecar's `Sources`.
 
 ## Scratch space
 
