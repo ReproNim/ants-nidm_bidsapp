@@ -557,6 +557,30 @@ class TestANTsSegmentation(unittest.TestCase):
             mock_segment.assert_not_called()
         self.assertIn("coarser than 2.0 mm", self.segmenter.last_failure_reason)
 
+    def test_run_subject_records_reason_when_segmentation_raises(self):
+        """A failure inside segment_image (folding gate, OOM, ...) leaves a
+        failure_reason for processing_summary.json."""
+        anat = self.bids_dir / "sub-01" / "anat"
+        anat.mkdir(parents=True, exist_ok=True)
+        (anat / "sub-01_T1w.nii.gz").write_text("x")
+        with patch.object(self.segmenter, 'load_image', return_value=MagicMock()), \
+             patch.object(self.segmenter, 'segment_image',
+                          side_effect=RuntimeError("registration folded for atlas 3")):
+            self.segmenter.max_voxel_size = None
+            self.assertFalse(self.segmenter.run_subject("sub-01"))
+        self.assertEqual(self.segmenter.last_failure_reason,
+                         "RuntimeError: registration folded for atlas 3")
+
+    def test_run_subject_records_reason_when_image_does_not_load(self):
+        anat = self.bids_dir / "sub-01" / "anat"
+        anat.mkdir(parents=True, exist_ok=True)
+        (anat / "sub-01_T1w.nii.gz").write_text("x")
+        with patch.object(self.segmenter, 'load_image', return_value=None):
+            self.segmenter.max_voxel_size = None
+            self.assertFalse(self.segmenter.run_subject("sub-01"))
+        self.assertEqual(self.segmenter.last_failure_reason,
+                         "could not load sub-01_T1w.nii.gz")
+
     def test_run_subject_session_with_run_entity(self):
         """ABIDE II longitudinal names (sub-X_ses-N_run-1_T1w) must be found,
         and the standard acquisition chosen over acq-hires."""

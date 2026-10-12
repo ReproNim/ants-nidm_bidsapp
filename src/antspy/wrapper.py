@@ -770,11 +770,13 @@ class ANTsSegmentation:
             # Load image using helper to centralize error handling (and simplify testing)
             img = self.load_image(str(input_file))
             if img is None:
+                self.last_failure_reason = f"could not load {input_file.name}"
                 return False
             
             # Run segmentation
             segmentation = self.segment_image(img, method=method)
             if not segmentation:
+                self.last_failure_reason = f"segmentation of {input_file.name} returned no result"
                 return False
             
             # Save results and get volumes, passing the input T1w file path
@@ -795,6 +797,7 @@ class ANTsSegmentation:
             return True
             
         except Exception as e:
+            self.last_failure_reason = f"{type(e).__name__}: {e}"
             self.logger.error(f"Error processing subject {subject_id}: {str(e)}")
             return False
         
