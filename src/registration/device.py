@@ -39,9 +39,11 @@ def resolve_device(requested, cuda_probe=None):
     if not available:
         raise DeviceUnavailable(
             "--device cuda was requested but torch.cuda.is_available() is False. "
-            "Submit to a GPU partition (e.g. --partition pi_satra --gres=gpu:1) "
-            "and run the container with `apptainer --nv`, or pass --device cpu "
-            "for a small debugging run. Not falling back to CPU automatically: "
+            "Request a GPU (e.g. sbatch --gres=gpu:1) and run the container with "
+            "`apptainer --nv` or `docker --gpus all`, or pass --device cpu for a "
+            "small debugging run. If a GPU was allocated and nvidia-smi lists it, "
+            "the node's GPU or driver is likely faulty: resubmit excluding that "
+            "node (sbatch --exclude=<node>). Not falling back to CPU automatically: "
             "FireANTs on CPU is slower than the ANTs path it replaces."
         )
     return "cuda"
