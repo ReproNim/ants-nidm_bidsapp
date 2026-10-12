@@ -173,7 +173,6 @@ ants-nidm bids_dir output_dir participant \
   --participant-label 01 \
   --session-label pre \
   --modality T1w \
-  --prob-threshold 0.5 \
   --nidm-input-dir /path/to/nidm/inputs \
   --num-threads 4 \
   --verbose
@@ -295,7 +294,6 @@ restructure the input or open an issue.
 - `--max-voxel-size`: skip input images with any voxel dimension above this,
   in mm (default: 2.0); the subject fails if none is fine enough
 - `--method`: Segmentation method - `quick` or `fusion` (default: fusion)
-- `--prob-threshold`: accepted for compatibility (default: 0.5); neither method currently uses it
 - `--num-threads`: Number of threads to use for processing (default: 1). Applies
   to the ANTs stages (N4, brain extraction, fusion voting) via
   `ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS`; registration runs on the GPU.

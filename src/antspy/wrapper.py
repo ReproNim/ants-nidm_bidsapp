@@ -49,7 +49,6 @@ class ANTsSegmentation:
                  output_dir=None,
                  temp_dir=None,
                  modality='T1w',
-                 prob_threshold=0.5,
                  num_threads=1,
                  device='cuda',
                  fireants_batch_size=5,
@@ -68,8 +67,6 @@ class ANTsSegmentation:
             Path to temporary directory
         modality : str
             Modality to process (default: T1w)
-        prob_threshold : float
-            Probability threshold for binary mask creation
         num_threads : int
             Number of threads to use
         device : str
@@ -153,7 +150,6 @@ class ANTsSegmentation:
         self.template_labels_path = base_data_dir / 'OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_OASIS-30_v2.nii.gz'
         
         self.modality = modality
-        self.prob_threshold = prob_threshold
         self.num_threads = num_threads
         # Registration runs on FireANTs. resolve_device raises rather than
         # silently falling back to CPU: FireANTs on CPU is slower than the ANTs

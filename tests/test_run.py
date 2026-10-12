@@ -309,7 +309,6 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = None
                 self.modality = "T1w"
-                self.prob_threshold = 0.5
                 self.method = "quick"
                 self.skip_nidm = False
                 self.skip_ants = False
@@ -445,7 +444,6 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = None
                 self.modality = "T1w"
-                self.prob_threshold = 0.5
                 self.method = "fusion"
                 self.skip_nidm = False
                 self.skip_ants = False
@@ -487,7 +485,6 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "99"
                 self.session_label = None
                 self.modality = "T1w"
-                self.prob_threshold = 0.5
                 self.method = "fusion"
                 self.skip_nidm = False
                 self.skip_ants = False
@@ -527,7 +524,6 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = None
                 self.modality = "T1w"
-                self.prob_threshold = 0.5
                 self.method = "fusion"
                 self.skip_nidm = False
                 self.skip_ants = True
@@ -575,7 +571,6 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = None
                 self.modality = "T1w"
-                self.prob_threshold = 0.5
                 self.method = "fusion"
                 self.skip_nidm = True
                 self.skip_ants = False
@@ -621,7 +616,6 @@ class TestRun(unittest.TestCase):
                 self.participant_label = "01"
                 self.session_label = "01"
                 self.modality = "T1w"
-                self.prob_threshold = 0.5
                 self.method = "quick"
                 self.skip_nidm = False
                 self.skip_ants = False
@@ -928,6 +922,18 @@ class TestRun(unittest.TestCase):
 
         argv = ["ants-nidm", "/bids", "/out", "participant",
                 "--fireants-batch-size", "-2"]
+        with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
+            parse_arguments()
+
+    def test_prob_threshold_is_rejected(self):
+        """--prob-threshold was accepted but never read by either method, so a
+        value passed to it changed nothing. It is now an unknown argument."""
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        argv = ["ants-nidm", "/bids", "/out", "participant", "--prob-threshold", "0.3"]
         with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
             parse_arguments()
 
