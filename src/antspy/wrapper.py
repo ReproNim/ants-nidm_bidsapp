@@ -17,7 +17,7 @@ from natsort import natsorted
 
 from src.registration import apply_warp, build_label_map, register_to_template, warp_atlases
 from src.registration.device import resolve_device
-from src.antspy.inputs import bids_relative, select_anat_input
+from src.antspy.inputs import DEFAULT_MAX_VOXEL_SIZE, bids_relative, choose_anat_input
 
 #: Registration scratch for one subject is ~1-2 GB; below this much free
 #: space under $TMPDIR the app uses output_dir/tmp instead.
@@ -54,6 +54,7 @@ class ANTsSegmentation:
                  device='cuda',
                  fireants_batch_size=5,
                  label_interpolation='genericlabel',
+                 max_voxel_size=DEFAULT_MAX_VOXEL_SIZE,
                  verbose=False):
         """Initialize ANTs segmentation.
         
@@ -76,6 +77,8 @@ class ANTsSegmentation:
         fireants_batch_size : int
             Atlases per FireANTs registration batch (0 = all at once). 20 at once
             exceeds 80 GB of GPU memory; 5 keeps peak use under ~20 GB
+        max_voxel_size : float or None
+            Inputs coarser than this (mm, any dimension) are not segmented.
         label_interpolation : str
             Interpolation mode FireANTs uses when warping atlas labels
         verbose : bool
@@ -159,6 +162,9 @@ class ANTsSegmentation:
         self.device = resolve_device(device)
         self.fireants_batch_size = fireants_batch_size
         self.label_interpolation = label_interpolation
+        self.max_voxel_size = max_voxel_size
+        # Why the last run_subject call failed, for processing_summary.json.
+        self.last_failure_reason = None
         self.verbose = verbose
 
         # ANTsPy takes no threads argument: every ITK filter it calls reads
@@ -741,10 +747,22 @@ class ANTsSegmentation:
             else:
                 bids_session = None
                 
+            self.last_failure_reason = None
             # Find input image (run-/acq- entities allowed; see inputs.py)
-            input_file = select_anat_input(self.bids_dir, bids_subject, bids_session,
-                                           suffix=self.modality, logger=self.logger)
+            choice = choose_anat_input(self.bids_dir, bids_subject, bids_session,
+                                       suffix=self.modality,
+                                       max_voxel_size=self.max_voxel_size,
+                                       logger=self.logger)
+            input_file = choice.chosen
+            if input_file is None and choice.too_coarse:
+                self.last_failure_reason = (
+                    f"every {self.modality} image is coarser than "
+                    f"{self.max_voxel_size} mm: " + ", ".join(
+                        f"{p.name} {z}" for p, z in choice.too_coarse))
+                self.logger.error(f"Not segmenting {subject_id}: {self.last_failure_reason}")
+                return False
             if input_file is None:
+                self.last_failure_reason = f"no {self.modality} image found"
                 self.logger.error(f"No {self.modality} image found for subject {subject_id}")
                 return False
             self.logger.info(f"Processing {input_file}")

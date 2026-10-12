@@ -11,12 +11,24 @@ segmented per subject/session, chosen by:
 3. then the lowest ``run-`` number (a file with no run counts as run 0),
 4. then the file name.
 
+Images coarser than ``max_voxel_size`` in any dimension are skipped and the
+next one in that order is used; if none is fine enough, nothing is chosen and
+the subject fails. ABIDE II UCLA_Long's ``acq-hires`` T1w, for example, is
+1.5 x 1.5 x 4 mm, too coarse for a cortical parcellation.
+
 Every caller that needs the input path uses this, so segmentation and the
 recorded provenance name the same file. The choice and every skipped
 alternative are logged.
 """
 import re
+from collections import namedtuple
 from pathlib import Path
+
+DEFAULT_MAX_VOXEL_SIZE = 2.0  # mm, any dimension
+
+# chosen: Path or None; not_used: fine-enough Paths ranked below the choice;
+# too_coarse: (Path, voxel size tuple) pairs over the limit.
+AnatChoice = namedtuple("AnatChoice", ["chosen", "not_used", "too_coarse"])
 
 
 def _candidates(anat_dir, subject, session, suffix):
@@ -57,16 +69,43 @@ def rank_anat_inputs(bids_dir, subject, session=None, suffix="T1w"):
     return [path for path, _ in sorted(_candidates(anat_dir, subject, session, suffix), key=_rank)]
 
 
-def select_anat_input(bids_dir, subject, session=None, suffix="T1w", logger=None):
-    """Return the image to segment for one subject/session, or None."""
+def voxel_size(path):
+    """Voxel size in mm of the first three dimensions, from the header only."""
+    import nibabel as nib
+    return tuple(round(float(z), 3) for z in nib.load(str(path)).header.get_zooms()[:3])
+
+
+def choose_anat_input(bids_dir, subject, session=None, suffix="T1w",
+                      max_voxel_size=None, logger=None):
+    """Pick the image to segment; see the module docstring for the order."""
     ranked = rank_anat_inputs(bids_dir, subject, session, suffix)
-    if not ranked:
-        return None
+    fine, too_coarse = [], []
+    for path in ranked:
+        if max_voxel_size is not None:
+            try:
+                zooms = voxel_size(path)
+            except Exception:
+                # Unreadable header: not this check's call; loading it fails
+                # loudly later.
+                zooms = (0.0,)
+            if max(zooms) > max_voxel_size:
+                too_coarse.append((path, zooms))
+                continue
+        fine.append(path)
+    choice = AnatChoice(fine[0] if fine else None, fine[1:], too_coarse)
     if logger is not None:
-        logger.info(f"{suffix} input: {ranked[0].name}")
-        for path in ranked[1:]:
+        if choice.chosen is not None:
+            logger.info(f"{suffix} input: {choice.chosen.name}")
+        for path in choice.not_used:
             logger.info(f"  not used: {path.name}")
-    return ranked[0]
+        for path, zooms in too_coarse:
+            logger.warning(f"  not used, voxels {zooms} mm exceed {max_voxel_size} mm: {path.name}")
+    return choice
+
+
+def select_anat_input(bids_dir, subject, session=None, suffix="T1w", logger=None):
+    """Return the best-ranked image for one subject/session, or None."""
+    return choose_anat_input(bids_dir, subject, session, suffix, logger=logger).chosen
 
 
 def bids_relative(path, bids_dir):

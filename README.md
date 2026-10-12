@@ -240,7 +240,8 @@ A checklist for a new dataset.
    wrong segmentation. `scripts/check_label_volume_plausibility.py
    <output_dir>` compares every structure with its range in the 20 atlases and
    flags anything far outside it (add `--protocol freesurfer` for `quick`
-   outputs). Look at a few `dseg` images over their T1w.
+   outputs). It counts voxels against the 1 mm atlases, so it is only
+   meaningful for inputs near 1 mm. Look at a few `dseg` images over their T1w.
 
 **Scope.** The atlases are the 20 adult OASIS-TRT-20 brains. The app has not
 been validated on young children, on brains with large lesions or resections,
@@ -258,9 +259,15 @@ Exactly one is segmented, chosen in this order:
 3. lowest `run-` number (no `run-` counts as run 0);
 4. file name.
 
+An image with any voxel dimension above `--max-voxel-size` (default 2 mm) is
+skipped and the next one is used. If no image is fine enough, the subject is
+not segmented and the run fails. A file's BIDS label says nothing about its
+resolution: ABIDE II UCLA_Long's `acq-hires` T1w is 1.5 x 1.5 x 4 mm.
+
 The choice and every skipped file are logged and recorded in
-`processing_summary.json` (`input_file`, `inputs_not_used`) and in the
-segmentation's sidecar (`Sources`). If a dataset needs a different choice,
+`processing_summary.json` (`input_file`, `inputs_not_used`,
+`inputs_too_coarse` with voxel sizes, and `failure_reason` when nothing was
+segmented) and in the segmentation's sidecar (`Sources`). If a dataset needs a different choice,
 restructure the input or open an issue.
 
 ### NIDM input
@@ -285,6 +292,8 @@ restructure the input or open an issue.
 
 **Processing Options:**
 - `--modality`: Imaging modality to process (default: T1w)
+- `--max-voxel-size`: skip input images with any voxel dimension above this,
+  in mm (default: 2.0); the subject fails if none is fine enough
 - `--method`: Segmentation method - `quick` or `fusion` (default: fusion)
 - `--prob-threshold`: accepted for compatibility (default: 0.5); neither method currently uses it
 - `--num-threads`: Number of threads to use for processing (default: 1). Applies

@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.antspy.inputs import rank_anat_inputs, select_anat_input  # noqa: E402
+from src.antspy.inputs import choose_anat_input, rank_anat_inputs, select_anat_input  # noqa: E402
 
 
 def _touch(anat, *names):
@@ -81,3 +81,41 @@ def test_rank_lists_all_candidates_best_first(tmp_path):
     assert [p.name for p in rank_anat_inputs(tmp_path, "01", "1")] == [
         "sub-01_ses-1_run-1_T1w.nii.gz", "sub-01_ses-1_acq-hires_run-1_T1w.nii.gz"]
     assert rank_anat_inputs(tmp_path, "02", "1") == []
+
+
+def _nifti(path, zooms):
+    import nibabel as nib
+    import numpy as np
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.uint8), np.diag(list(zooms) + [1]))
+    nib.save(img, str(path))
+
+
+def test_choose_skips_images_coarser_than_the_limit(tmp_path):
+    # UCLA_Long's acq-hires is 1.5x1.5x4 mm; a coarse best-ranked image gives
+    # way to the next one that passes.
+    anat = tmp_path / "sub-01" / "ses-1" / "anat"
+    _nifti(anat / "sub-01_ses-1_run-1_T1w.nii.gz", (1.5, 1.5, 4.0))
+    _nifti(anat / "sub-01_ses-1_run-2_T1w.nii.gz", (1.0, 1.0, 1.0))
+    choice = choose_anat_input(tmp_path, "01", "1", max_voxel_size=2.0)
+    assert choice.chosen.name == "sub-01_ses-1_run-2_T1w.nii.gz"
+    assert [p.name for p, _ in choice.too_coarse] == ["sub-01_ses-1_run-1_T1w.nii.gz"]
+    assert choice.too_coarse[0][1] == (1.5, 1.5, 4.0)
+    assert choice.not_used == []
+
+
+def test_choose_returns_none_when_every_image_is_too_coarse(tmp_path):
+    anat = tmp_path / "sub-01" / "ses-1" / "anat"
+    _nifti(anat / "sub-01_ses-1_acq-hires_run-1_T1w.nii.gz", (1.5, 1.5, 4.0))
+    choice = choose_anat_input(tmp_path, "01", "1", max_voxel_size=2.0)
+    assert choice.chosen is None
+    assert len(choice.too_coarse) == 1
+
+
+def test_choose_without_limit_keeps_rank_order(tmp_path):
+    anat = tmp_path / "sub-01" / "anat"
+    _touch(anat, "sub-01_acq-hires_T1w.nii.gz", "sub-01_T1w.nii.gz")
+    choice = choose_anat_input(tmp_path, "01")
+    assert choice.chosen.name == "sub-01_T1w.nii.gz"
+    assert [p.name for p in choice.not_used] == ["sub-01_acq-hires_T1w.nii.gz"]
+    assert choice.too_coarse == []

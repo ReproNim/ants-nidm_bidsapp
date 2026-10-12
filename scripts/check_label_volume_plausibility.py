@@ -24,6 +24,11 @@ accommodate it. The behaviour was seen and normalised rather than questioned.
 So this check compares each label against *its own* plausible range, taken from
 the twenty OASIS-TRT-20 atlases, rather than against the FOV.
 
+The comparison is in voxels, and the atlases are 1 mm isotropic, so the
+check is only meaningful for inputs near 1 mm. A 1.5 x 1.5 x 4 mm input
+(9 mm^3 voxels) flags almost every label as undersize even when the volumes
+in mm^3 are plausible; the app now refuses such inputs (--max-voxel-size).
+
 Calibration
 -----------
 On the 38 delivered Caltech subjects, a threshold of 5x the atlas maximum flags

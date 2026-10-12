@@ -15,7 +15,7 @@ import ants
 
 # Import local modules
 from src.antspy.wrapper import ANTsSegmentation
-from src.antspy.inputs import bids_relative, rank_anat_inputs
+from src.antspy.inputs import DEFAULT_MAX_VOXEL_SIZE, bids_relative, choose_anat_input
 
 # Version of the BIDS *specification* these derivatives claim conformance to.
 # Must never be derived from a library version: pkg_resources.get_distribution
@@ -139,18 +139,23 @@ def get_version_info(app_version):
     }
 
 
+def _failure_reason(segmenter):
+    reason = getattr(segmenter, 'last_failure_reason', None)
+    return reason if isinstance(reason, str) else None
+
+
 def save_processing_summary(logger, subject_dir, bids_subject, bids_session,
                             app_version, succeeded, nidm_written,
-                            bids_dir=None, anat_inputs=None):
+                            bids_dir=None, anat_choice=None, failure_reason=None):
     """Write processing_summary.json inside the subject directory.
 
     BABS zips only sub-<id>/, so anything written outside it is dropped from the
     delivered derivative -- which is why this goes in the subject dir and not the
     derivative root. Same file the freesurfer-nidm app ships per subject.
 
-    ``anat_inputs`` is rank_anat_inputs' list: the first entry is the image
-    segmented, the rest were present and not used. Both are recorded relative
-    to ``bids_dir``.
+    ``anat_choice`` is choose_anat_input's result: the image segmented, the
+    fine-enough images not used, and those skipped as too coarse (with their
+    voxel sizes), all relative to ``bids_dir``.
     """
     subject_label = f"sub-{bids_subject}"
     if bids_session:
@@ -167,9 +172,14 @@ def save_processing_summary(logger, subject_dir, bids_subject, bids_session,
         "nidm_written": nidm_written,
         "version_info": get_version_info(app_version),
     }
-    if anat_inputs:
-        summary["input_file"] = bids_relative(anat_inputs[0], bids_dir)
-        summary["inputs_not_used"] = [bids_relative(p, bids_dir) for p in anat_inputs[1:]]
+    if anat_choice is not None:
+        if anat_choice.chosen is not None:
+            summary["input_file"] = bids_relative(anat_choice.chosen, bids_dir)
+        summary["inputs_not_used"] = [bids_relative(p, bids_dir) for p in anat_choice.not_used]
+        summary["inputs_too_coarse"] = {
+            bids_relative(p, bids_dir): list(z) for p, z in anat_choice.too_coarse}
+    if failure_reason:
+        summary["failure_reason"] = failure_reason
 
     try:
         subject_dir = Path(subject_dir)
@@ -262,6 +272,11 @@ def parse_arguments():
     parser.add_argument('--label-interpolation', dest='label_interpolation',
                         help='Atlas label warping method [default: genericlabel]',
                         choices=['genericlabel', 'nearest'], default='genericlabel')
+    parser.add_argument('--max-voxel-size', dest='max_voxel_size', type=float,
+                        default=DEFAULT_MAX_VOXEL_SIZE,
+                        help='Skip input images with any voxel dimension above this, in mm; '
+                             'fail the subject if none is fine enough '
+                             f'[default: {DEFAULT_MAX_VOXEL_SIZE}]')
 
     parser.add_argument('-v', '--verbose', help='Verbose output',
                         action='store_true')
@@ -337,7 +352,8 @@ def initialize(args):
             verbose=args.verbose,
             device=args.device,
             fireants_batch_size=args.fireants_batch_size,
-            label_interpolation=args.label_interpolation
+            label_interpolation=args.label_interpolation,
+            max_voxel_size=getattr(args, 'max_voxel_size', DEFAULT_MAX_VOXEL_SIZE),
         )
 
     return layout, segmenter, derivatives_dir, nidm_input_dir
@@ -535,9 +551,10 @@ def process_participant(args, logger):
             success = False
             logger.error(f"Segmentation failed for subject {participant_label}")
     
-    anat_inputs = rank_anat_inputs(args.bids_dir, bids_subject, bids_session,
-                                   suffix=args.modality)
-    input_file = anat_inputs[0] if anat_inputs else None
+    anat_choice = choose_anat_input(args.bids_dir, bids_subject, bids_session,
+                                    suffix=args.modality,
+                                    max_voxel_size=getattr(args, 'max_voxel_size', DEFAULT_MAX_VOXEL_SIZE))
+    input_file = anat_choice.chosen
 
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)
     if success and not args.skip_nidm:
@@ -566,7 +583,8 @@ def process_participant(args, logger):
         succeeded=success,
         nidm_written=(not args.skip_nidm) and success,
         bids_dir=args.bids_dir,
-        anat_inputs=anat_inputs,
+        anat_choice=anat_choice,
+        failure_reason=_failure_reason(segmenter),
     )
 
     logger.info(f"Participant level analysis complete. Processing {'succeeded' if success else 'failed'}")
@@ -636,9 +654,10 @@ def process_session(args, logger):
             success = False
             logger.error(f"Segmentation failed for session {session_label}")
     
-    anat_inputs = rank_anat_inputs(args.bids_dir, bids_subject, bids_session,
-                                   suffix=args.modality)
-    input_file = anat_inputs[0] if anat_inputs else None
+    anat_choice = choose_anat_input(args.bids_dir, bids_subject, bids_session,
+                                    suffix=args.modality,
+                                    max_voxel_size=getattr(args, 'max_voxel_size', DEFAULT_MAX_VOXEL_SIZE))
+    input_file = anat_choice.chosen
 
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)
     if success and not args.skip_nidm:
@@ -667,7 +686,8 @@ def process_session(args, logger):
         succeeded=success,
         nidm_written=(not args.skip_nidm) and success,
         bids_dir=args.bids_dir,
-        anat_inputs=anat_inputs,
+        anat_choice=anat_choice,
+        failure_reason=_failure_reason(segmenter),
     )
 
     logger.info(f"Session level analysis complete. Processing {'succeeded' if success else 'failed'}")

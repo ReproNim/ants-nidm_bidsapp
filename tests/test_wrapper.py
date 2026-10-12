@@ -542,6 +542,21 @@ class TestANTsSegmentation(unittest.TestCase):
         self.assertEqual(json.loads(sidecar.read_text())["Sources"],
                          ["bids:raw:sub-01/ses-1/anat/sub-01_ses-1_run-1_T1w.nii.gz"])
 
+    def test_run_subject_refuses_input_coarser_than_limit(self):
+        """A 1.5x1.5x4 mm T1w (UCLA_Long acq-hires) is not segmented; the
+        reason is kept for processing_summary.json."""
+        # Imported here, not at module level: test_run.py swaps nibabel for a
+        # mock at collection time and conftest restores it only per test.
+        import nibabel as nib
+        anat = self.bids_dir / "sub-01" / "ses-1" / "anat"
+        anat.mkdir(parents=True, exist_ok=True)
+        nib.save(nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.uint8), np.diag([1.5, 1.5, 4.0, 1])),
+                 str(anat / "sub-01_ses-1_acq-hires_run-1_T1w.nii.gz"))
+        with patch.object(self.segmenter, 'segment_image') as mock_segment:
+            self.assertFalse(self.segmenter.run_subject("sub-01", "ses-1"))
+            mock_segment.assert_not_called()
+        self.assertIn("coarser than 2.0 mm", self.segmenter.last_failure_reason)
+
     def test_run_subject_session_with_run_entity(self):
         """ABIDE II longitudinal names (sub-X_ses-N_run-1_T1w) must be found,
         and the standard acquisition chosen over acq-hires."""

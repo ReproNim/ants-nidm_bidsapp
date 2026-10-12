@@ -77,6 +77,7 @@ sys.modules['nibabel'] = MagicMock()
 sys.modules['bids'] = mock_bids
 
 # Import after mocking
+from src.antspy.inputs import AnatChoice
 from src.run import (process_participant, process_session, main, nidm_conversion,
                      create_dataset_description, subject_output_dir,
                      find_nidm_input_file, save_processing_summary,
@@ -809,13 +810,26 @@ class TestRun(unittest.TestCase):
             subject_dir=subject_output_dir(self.output_dir, "01", "1"),
             bids_subject="01", bids_session="1", app_version=APP_VERSION,
             succeeded=True, nidm_written=True,
-            bids_dir=bids, anat_inputs=[used, other],
+            bids_dir=bids, failure_reason=None,
+            anat_choice=AnatChoice(used, [other], [(anat / "sub-01_ses-1_acq-lo_T1w.nii.gz", (1.5, 1.5, 4.0))]),
         )
         with open(path) as f:
             summary = json.load(f)
         self.assertEqual(summary["input_file"], "sub-01/ses-1/anat/sub-01_ses-1_run-1_T1w.nii.gz")
         self.assertEqual(summary["inputs_not_used"],
                          ["sub-01/ses-1/anat/sub-01_ses-1_acq-hires_run-1_T1w.nii.gz"])
+        self.assertEqual(summary["inputs_too_coarse"],
+                         {"sub-01/ses-1/anat/sub-01_ses-1_acq-lo_T1w.nii.gz": [1.5, 1.5, 4.0]})
+
+    def test_processing_summary_records_failure_reason(self):
+        path = save_processing_summary(
+            logger=self.logger, subject_dir=subject_output_dir(self.output_dir, "01"),
+            bids_subject="01", bids_session=None, app_version=APP_VERSION,
+            succeeded=False, nidm_written=False,
+            failure_reason="every T1w image is coarser than 2.0 mm",
+        )
+        with open(path) as f:
+            self.assertEqual(json.load(f)["failure_reason"], "every T1w image is coarser than 2.0 mm")
 
     def test_subject_output_dir(self):
         """Per-subject output dir is the zip unit: no app wrapper, no nidm/."""

@@ -106,8 +106,11 @@ atlases and exits non-zero if an entry stops reproducing.
 
 `inputs.rank_anat_inputs` lists every image of the requested suffix for one
 subject/session, allowing optional entities (`acq-`, `run-`, ...), and orders
-them; `select_anat_input` takes the first. `run_subject` and `run.py` both go
-through it, so the segmented file and the recorded one cannot differ. The
+them; `choose_anat_input` takes the first whose voxels are all within
+`--max-voxel-size` (`DEFAULT_MAX_VOXEL_SIZE`, 2 mm) and records the rest,
+too-coarse ones with their voxel sizes. When none qualifies, `run_subject`
+fails and sets `last_failure_reason`, which `run.py` writes to
+`processing_summary.json`. `run_subject` and `run.py` both go through it, so the segmented file and the recorded one cannot differ. The
 order (no `acq-`, then no other entities, then lowest run, then name) is
 documented for users in the README; change both together. The chosen file is
 written to `processing_summary.json` and to the dseg sidecar's `Sources`.
