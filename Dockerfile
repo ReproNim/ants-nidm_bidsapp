@@ -186,6 +186,15 @@ RUN chmod -R 755 /usr/local/bin || true
 RUN echo "ALL ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     chmod 666 /etc/passwd /etc/group || true
 
+# Everything the app reads must be usable by a non-root `--user`, the same
+# check Singularity runs at the end of %post.
+RUN unreadable="$(find /opt /app \( -type f ! -perm -o=r \) -o \( -type d ! -perm -o=rx \))" && \
+    if [ -n "$unreadable" ]; then \
+        echo "ERROR: not readable by other users:" >&2; \
+        echo "$unreadable" >&2; \
+        exit 1; \
+    fi
+
 ENTRYPOINT ["/entrypoint.sh"]
 
 # The commit this image was built from (docker build --build-arg

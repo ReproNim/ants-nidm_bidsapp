@@ -177,6 +177,14 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
         rmdir OASIS-TRT-20_DKT31_CMA_labels_v2/OASIS-TRT-20_DKT31_CMA_labels_v2
     fi
 
+    # The OSF archives store the OASIS-TRT-20 brains and labels as mode 600,
+    # and unzip restores that. A SIF keeps the builder's uid on those files, so
+    # every other account running the image cannot open the 40 atlases and
+    # `--method fusion` fails at the first atlas read. a+rX: files readable,
+    # directories traversable, nothing made executable. (The Dockerfile has
+    # the equivalent `chmod -R 755 /opt/data`.)
+    chmod -R a+rX /opt/data
+
     # List contents to verify
     echo "Data directory contents:"
     ls -la /opt/data/
@@ -205,6 +213,15 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     # Mirror Docker's writable scratch directory
     mkdir -p /work
     chmod 777 /work
+
+    # Last step: everything under /opt must be usable by whoever runs the
+    # image, not only by the account that built it.
+    unreadable="$(find /opt \( -type f ! -perm -o=r \) -o \( -type d ! -perm -o=rx \))"
+    if [ -n "$unreadable" ]; then
+        echo "ERROR: not readable by other users (the image only works for its builder):" >&2
+        echo "$unreadable" >&2
+        exit 1
+    fi
 
 %environment
     # Add opt to Python path
