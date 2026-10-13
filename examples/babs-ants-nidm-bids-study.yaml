@@ -1,4 +1,4 @@
-# Example BABS configuration for ants-nidm 0.2.0.
+# Example BABS configuration for ants-nidm 0.2.1.
 #
 # Uses the BIDS-study project layout from PennLINC/babs#369. To keep BABS's
 # legacy layout instead, delete the three *_path settings below.
@@ -48,7 +48,7 @@ singularity_args:
 # not by BABS. An app-name folder here would make every subject's NIDM land on
 # the same path and all but the first be lost when the zips are merged.
 zip_foldernames:
-    ${subid}: "0-2-0"
+    ${subid}: "0-2-1"
 
 cluster_resources:
     interpreting_shell: "/bin/bash"
