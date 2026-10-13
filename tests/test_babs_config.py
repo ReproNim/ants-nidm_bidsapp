@@ -17,7 +17,8 @@ def _config():
 
 
 def test_zips_each_subject_folder():
-    assert _config()["zip_foldernames"] == {"${subid}": "0-2-0"}
+    # The version suffix itself is checked against APP_VERSION in test_version.py.
+    assert list(_config()["zip_foldernames"]) == ["${subid}"]
 
 
 def test_requests_a_gpu():
