@@ -36,6 +36,31 @@ BUILD_EXT_CMD = r"python3 setup\.py build_ext"
 FUSED_OPS_ASSERTION_CMD = r'python3 -c "import torch, fireants_fused_ops'
 
 
+def _post_statements():
+    """Non-blank, non-comment lines of Singularity's %post, stripped."""
+    # Anchor on the section header at the start of a line: "%post" also occurs
+    # in prose inside the header comment.
+    post = re.search(r"^%post\s*$", SINGULARITY, re.MULTILINE)
+    assert post, "Singularity has no %post section"
+    rest = SINGULARITY[post.end():]
+    nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
+    body = rest[: nxt.start()] if nxt else rest
+    return [
+        line.strip()
+        for line in body.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def _commands(text):
+    """Lines of a build file that are not comments, stripped."""
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
 @pytest.mark.parametrize("name,pattern", sorted(PINNED.items()))
 def test_versions_match_across_build_files(name, pattern):
     d = re.search(pattern, DOCKERFILE)
@@ -95,18 +120,7 @@ def test_singularity_post_fails_fast():
     then silently returns one-hot label volumes at runtime -- exactly the
     failure that assertion exists to prevent.
     """
-    # Anchor on the section header at the start of a line: "%post" also occurs
-    # in prose inside the header comment.
-    post = re.search(r"^%post\s*$", SINGULARITY, re.MULTILINE)
-    assert post, "Singularity has no %post section"
-    rest = SINGULARITY[post.end():]
-    nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
-    body = rest[: nxt.start()] if nxt else rest
-    statements = [
-        line.strip()
-        for line in body.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    statements = _post_statements()
     assert statements, "%post is empty"
     assert statements[0] == "set -e", (
         "the first statement in %post must be `set -e`; found "
@@ -206,3 +220,46 @@ def test_docker_commit_label_comes_after_every_build_step():
     """An ARG used by a later RUN invalidates the cache from that point on every
     new commit, so the label must follow the last RUN."""
     assert DOCKERFILE.index("ARG GIT_COMMIT") > DOCKERFILE.rindex("\nRUN ")
+
+
+# The command that fails the build when a file under the app's directories is
+# not world-readable (or a directory not world-traversable).
+UNREADABLE_CHECK = re.compile(
+    r"find /opt(?: /app)? \\\( -type f ! -perm -o=r \\\) -o \\\( -type d ! -perm -o=rx \\\)"
+)
+
+
+def test_singularity_makes_atlas_data_world_readable():
+    """The OSF atlas archives unpack as mode 600 and a SIF keeps the builder's
+    uid, so without this chmod every other account fails at the first atlas
+    read under --method fusion (reported in ReproNim/ants-nidm_bidsapp#7). It
+    must follow the last unzip into /opt/data, or that archive keeps its 600s.
+    """
+    statements = _post_statements()
+    unzips = [i for i, s in enumerate(statements)
+              if s.startswith("unzip ") and "OASIS" in s]
+    chmods = [i for i, s in enumerate(statements) if s == "chmod -R a+rX /opt/data"]
+    assert unzips, "no OASIS unzip found in %post"
+    assert chmods, "%post must run `chmod -R a+rX /opt/data`"
+    assert chmods[-1] > unzips[-1], (
+        "`chmod -R a+rX /opt/data` must come after the last OASIS unzip"
+    )
+
+
+@pytest.mark.parametrize("text,name", BUILD_FILES, ids=BUILD_IDS)
+def test_build_fails_on_files_other_users_cannot_read(text, name):
+    """A permission bug does not show up for the builder, who owns the files,
+    so the build itself has to check -- after every step that writes files."""
+    commands = _commands(text)
+    checks = [i for i, c in enumerate(commands) if UNREADABLE_CHECK.search(c)]
+    assert checks, f"{name} must fail the build on files other users cannot read"
+    writers = [i for i, c in enumerate(commands)
+               if re.search(r"\b(pip3? install|python3 -m pip install|unzip|wget|COPY)\b", c)]
+    assert checks[-1] > writers[-1], (
+        f"{name}: the readability check must come after the last step that "
+        f"writes files; last writer is {commands[writers[-1]]!r}"
+    )
+    # It must be able to fail: in Singularity that relies on `set -e` plus an
+    # explicit exit, in the Dockerfile on the RUN's exit status.
+    tail = "\n".join(commands[checks[-1]:checks[-1] + 6])
+    assert "exit 1" in tail, f"{name}: the readability check must exit non-zero"
