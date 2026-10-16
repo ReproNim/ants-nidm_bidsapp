@@ -11,9 +11,6 @@ from pathlib import Path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
-# Check if running in CI environment
-IN_CI = os.environ.get('CI', 'false').lower() == 'true'
-
 # Import numpy and nibabel for test image creation
 import numpy as np
 import nibabel as nib
@@ -40,7 +37,33 @@ mock_ants.mask_image = mock_image_read
 from src.antspy.wrapper import ANTsSegmentation
 from src.registration.device import DeviceUnavailable
 
-@unittest.skipIf(IN_CI, "Skip in CI environment as it requires template directory")
+
+def make_fake_data_dir(root):
+    """An empty-file copy of the /opt/data layout, with the real file names.
+
+    ants is mocked and registration and fusion are patched in these tests, so
+    nothing reads the images; ANTsSegmentation only needs the paths to exist
+    and the atlas/label globs to pair up.
+    """
+    template = root / 'OASIS-30_Atropos_template'
+    (template / 'Priors2').mkdir(parents=True)
+    for name in ['T_template0', 'T_template0_BrainCerebellum',
+                 'T_template0_BrainCerebellumProbabilityMask',
+                 'T_template0_BrainCerebellumExtractionMask']:
+        (template / f'{name}.nii.gz').touch()
+    for i in range(1, 7):
+        (template / 'Priors2' / f'priors{i}.nii.gz').touch()
+    brains = root / 'OASIS-TRT-20_brains'
+    labels = root / 'OASIS-TRT-20_DKT31_CMA_labels_v2'
+    brains.mkdir()
+    labels.mkdir()
+    for i in range(1, 21):
+        (brains / f'OASIS-TRT-20-{i}_brain.nii.gz').touch()
+        (labels / f'OASIS-TRT-20-{i}_DKT31_CMA_labels.nii.gz').touch()
+    (root / 'OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_OASIS-30_v2.nii.gz').touch()
+    return root
+
+
 class TestANTsSegmentation(unittest.TestCase):
     """Test cases for the ANTs segmentation wrapper"""
 
@@ -50,12 +73,20 @@ class TestANTsSegmentation(unittest.TestCase):
         self.bids_dir = self.temp_dir / "bids"
         self.output_dir = self.temp_dir / "derivatives"
         self.temp_path = self.temp_dir / "tmp"
-        
+
         # Create directories
         self.bids_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.temp_path.mkdir(parents=True, exist_ok=True)
-        
+
+        # Every ANTsSegmentation built in a test, here or in the test body,
+        # sees the fake tree rather than /opt/data or the untracked data/.
+        self.data_dir = make_fake_data_dir(self.temp_dir / "data")
+        data_patch = patch('src.antspy.wrapper._default_data_dir',
+                           return_value=self.data_dir)
+        data_patch.start()
+        self.addCleanup(data_patch.stop)
+
         # Mock _load_templates method
         with patch('src.antspy.wrapper.ANTsSegmentation._load_templates') as mock_load:
             mock_load.return_value = {

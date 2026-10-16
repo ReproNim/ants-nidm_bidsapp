@@ -37,6 +37,20 @@ JLF_PARAMS = dict(
     max_lab_plus_one=True,
 )
 
+
+def _default_data_dir():
+    """Root of the templates and atlases: the container's /opt/data, else a
+    data/ directory at the repository root (local development), else
+    /opt/data so the missing-template error names the container path.
+    Tests patch this to point at a fake tree."""
+    if Path('/opt/data').exists():
+        return Path('/opt/data')
+    local_data_dir = Path(__file__).parent.parent.parent / 'data'
+    if local_data_dir.exists():
+        return local_data_dir
+    return Path('/opt/data')
+
+
 class ANTsSegmentation:
     """
     Wrapper class for ANTs segmentation functionality using ANTsPy.
@@ -106,18 +120,8 @@ class ANTsSegmentation:
         else:
             self.temp_dir = None
         
-        # Set data paths - check both container and local paths
-        # First check for container path, then local development path
-        if Path('/opt/data').exists():
-            base_data_dir = Path('/opt/data')
-        else:
-            # Check for local data directory relative to the package
-            local_data_dir = Path(__file__).parent.parent.parent / 'data'
-            if local_data_dir.exists():
-                base_data_dir = local_data_dir
-            else:
-                base_data_dir = Path('/opt/data')  # Fallback to container path
-        
+        base_data_dir = _default_data_dir()
+
         # OASIS-30 template might be in a subdirectory after extraction
         potential_template_dirs = [
             base_data_dir / 'OASIS-30_Atropos_template',
