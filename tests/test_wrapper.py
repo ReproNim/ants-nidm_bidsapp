@@ -661,6 +661,16 @@ class TestANTsSegmentation(unittest.TestCase):
         self.assertIs(mock_jlf.call_args.kwargs["atlas_list"], warped_imgs)
         self.assertIs(mock_jlf.call_args.kwargs["label_list"], warped_labs)
 
+        # All twenty atlases reach registration, each brain paired with its
+        # own label map, in atlas order (1, 2, ..., 20, not 1, 10, 11, ...).
+        atlas_paths, label_paths = mock_warp.call_args.args[2:4]
+        self.assertEqual(len(atlas_paths), 20)
+        self.assertEqual(len(label_paths), 20)
+        for k, (brain, label) in enumerate(zip(atlas_paths, label_paths), 1):
+            self.assertEqual(Path(brain).name, f"OASIS-TRT-20-{k}_brain.nii.gz")
+            self.assertEqual(Path(label).name,
+                             f"OASIS-TRT-20-{k}_DKT31_CMA_labels.nii.gz")
+
     def test_only_quick_registers_to_the_template(self):
         """The subject-to-template warp is used by 'quick' alone. Under
         'fusion' it was one more GPU registration whose result stayed on the
@@ -1080,6 +1090,31 @@ class TestANTsSegmentation(unittest.TestCase):
         # The raise must happen before any template loading -- not merely
         # somewhere during construction.
         mock_load.assert_not_called()
+
+class TestDefaultDataDir(unittest.TestCase):
+    """The probe order in _default_data_dir. Every other test patches it."""
+
+    def probe(self, present):
+        from src.antspy import wrapper
+        local = Path(wrapper.__file__).parent.parent.parent / 'data'
+        names = {'opt': Path('/opt/data'), 'local': local}
+        existing = {names[n] for n in present}
+        with patch.object(Path, 'exists', autospec=True,
+                          side_effect=lambda p: p in existing):
+            return wrapper._default_data_dir(), local
+
+    def test_container_path_wins_over_a_local_checkout(self):
+        found, _ = self.probe({'opt', 'local'})
+        self.assertEqual(found, Path('/opt/data'))
+
+    def test_local_data_dir_used_outside_the_container(self):
+        found, local = self.probe({'local'})
+        self.assertEqual(found, local)
+
+    def test_neither_present_names_the_container_path(self):
+        found, _ = self.probe(set())
+        self.assertEqual(found, Path('/opt/data'))
+
 
 if __name__ == "__main__":
     unittest.main()
