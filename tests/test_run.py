@@ -862,6 +862,47 @@ class TestRun(unittest.TestCase):
         self.assertEqual(find_nidm_input_file(nidm_in, "02", "baseline"),
                          sess / "nidm.ttl")
 
+    def test_unfetched_annex_nidm_input_is_an_error_not_a_miss(self):
+        """A dangling symlink is what datalad leaves before `datalad get`.
+        Falling through to the dataset-level file, or to no input at all,
+        would build nidm.ttl without the subject's demographics and exit 0."""
+        from src.run import NIDMInputNotRetrieved
+
+        nidm_in = Path(self.temp_dir) / "NIDM"
+        (nidm_in / "sub-01").mkdir(parents=True)
+        (nidm_in / "sub-01" / "nidm.ttl").symlink_to(
+            "../.git/annex/objects/missing")
+        (nidm_in / "nidm.ttl").write_text("")
+
+        with self.assertRaises(NIDMInputNotRetrieved):
+            find_nidm_input_file(nidm_in, "01")
+
+        # Only the first candidate present decides: a fetched per-subject
+        # file still wins over a dangling lower-priority one.
+        (nidm_in / "sub-02").mkdir()
+        (nidm_in / "sub-02" / "nidm.ttl").write_text("")
+        (nidm_in / "sub-02.ttl").symlink_to("missing")
+        self.assertEqual(find_nidm_input_file(nidm_in, "02"),
+                         nidm_in / "sub-02" / "nidm.ttl")
+
+    def test_nidm_input_miss_is_logged_as_a_warning(self):
+        import logging
+
+        nidm_in = Path(self.temp_dir) / "NIDM"
+        nidm_in.mkdir()
+        logger = logging.getLogger("ants-nidm-test")
+
+        with self.assertLogs(logger, level="WARNING") as logs:
+            self.assertIsNone(
+                find_nidm_input_file(nidm_in, "01", "baseline", logger=logger))
+        self.assertIn("sub-01 ses-baseline", logs.output[0])
+
+        # No input directory at all is not a miss worth warning about.
+        from unittest.mock import MagicMock
+        quiet = MagicMock()
+        self.assertIsNone(find_nidm_input_file(None, "01", logger=quiet))
+        quiet.warning.assert_not_called()
+
     def test_device_defaults_to_cuda(self):
         import sys
         from unittest.mock import patch

@@ -289,6 +289,12 @@ restructure the input or open an issue.
 3. `<dir>/sub-<id>[_ses-<ses>].ttl`
 4. `<dir>/nidm.ttl`
 
+The lookup runs before segmentation. If the directory exists but none of
+these is present, the app logs a warning and writes a `nidm.ttl` without the
+subject's demographics or input provenance. If the first one present is a
+symlink with no content behind it (a datalad/git-annex clone before
+`datalad get`), the run fails instead of treating it as a missing record.
+
 ### Command-line Arguments
 
 **Required:**
