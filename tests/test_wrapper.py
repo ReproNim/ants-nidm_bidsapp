@@ -1091,6 +1091,24 @@ class TestANTsSegmentation(unittest.TestCase):
         # somewhere during construction.
         mock_load.assert_not_called()
 
+    def test_missing_template_dir_logs_the_data_dir_it_searched(self):
+        """Outside the container the data dir is the checkout's data/, not
+        /opt/data, so the error must name the directory actually searched."""
+        shutil.rmtree(self.data_dir / 'OASIS-30_Atropos_template')
+        with self.assertLogs('ants-nidm.segmentation', level='ERROR') as logs:
+            with self.assertRaises(ValueError):
+                ANTsSegmentation(
+                    bids_dir=str(self.bids_dir),
+                    output_dir=str(self.output_dir),
+                    temp_dir=str(self.temp_path),
+                    modality='T1w',
+                    num_threads=1,
+                    device='cpu',
+                )
+        contents_lines = [m for m in logs.output if 'Contents of' in m]
+        self.assertEqual(len(contents_lines), 1)
+        self.assertIn(f"Contents of {self.data_dir}:", contents_lines[0])
+
 class TestDefaultDataDir(unittest.TestCase):
     """The probe order in _default_data_dir. Every other test patches it."""
 
