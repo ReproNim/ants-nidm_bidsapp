@@ -70,7 +70,17 @@ def subject_output_dir(output_dir, bids_subject, bids_session=None):
     return subject_dir
 
 
-def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None):
+class NIDMInputNotRetrieved(FileNotFoundError):
+    """The subject's NIDM input is a symlink with no content behind it.
+
+    That is what a datalad/git-annex clone looks like before ``datalad get``.
+    It is not the same as the subject having no NIDM record: treating it as
+    a miss would build ``nidm.ttl`` without the inherited demographics and
+    provenance and still exit 0, for every subject in the dataset.
+    """
+
+
+def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None, logger=None):
     """Search for NIDM input file in standard locations.
 
     Candidates are tried most-specific first. The per-subject ``nidm.ttl``
@@ -82,9 +92,15 @@ def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None):
         nidm_input_dir (Path): Directory containing NIDM files
         subject_id (str): Subject ID without 'sub-' prefix
         session_id (str, optional): Session ID without 'ses-' prefix
+        logger (logging.Logger, optional): if given, a miss in an existing
+            input directory is logged as a warning
 
     Returns:
         Path or None: Path to NIDM file if found, None otherwise
+
+    Raises:
+        NIDMInputNotRetrieved: the first candidate present is a dangling
+            symlink (annexed content not fetched)
     """
     if nidm_input_dir is None:
         return None
@@ -113,7 +129,23 @@ def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None):
         nidm_input_dir / "nidm.ttl",
     ]
 
-    return next((c for c in candidates if c.exists()), None)
+    for c in candidates:
+        if c.exists():
+            return c
+        if c.is_symlink():
+            raise NIDMInputNotRetrieved(
+                f"NIDM input {c} is a symlink with no content behind it "
+                f"(run `datalad get` on the NIDM input dataset)"
+            )
+
+    if logger is not None:
+        logger.warning(
+            f"No NIDM input for sub-{subject_id}"
+            + (f" ses-{session_id}" if session_id else "")
+            + f" in {nidm_input_dir}; nidm.ttl will not include its"
+            " demographics or input provenance"
+        )
+    return None
 
 
 def get_version_info(app_version):
@@ -352,6 +384,10 @@ def initialize(args):
         nidm_input_dir = Path(args.nidm_input_dir)
 
     if not nidm_input_dir.exists():
+        if args.nidm_input_dir is not None:
+            logging.getLogger('ants-nidm').warning(
+                f"--nidm-input-dir {nidm_input_dir} does not exist; "
+                "NIDM will be built without an input document")
         nidm_input_dir = None
 
     # Per-subject output layout (study-wide standard): everything this app
@@ -562,7 +598,16 @@ def process_participant(args, logger):
     bids_session = None
     
     logger.info(f"Processing single-session data for subject {participant_label}")
-    
+
+    # Look the NIDM input up before segmenting: an unfetched annex file is an
+    # error, and it should cost seconds, not a GPU segmentation.
+    nidm_input_file = None
+    if not args.skip_nidm:
+        nidm_input_file = find_nidm_input_file(
+            nidm_input_dir, bids_subject, session_id=None, logger=logger)
+        if nidm_input_file:
+            logger.info(f"Found NIDM input file: {nidm_input_file}")
+
     success = True
     
     # Run ANTs segmentation (unless skipped)
@@ -586,11 +631,6 @@ def process_participant(args, logger):
 
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)
     if success and not args.skip_nidm:
-        # Find NIDM input file for this subject (no session for participant level)
-        nidm_input_file = find_nidm_input_file(nidm_input_dir, bids_subject, session_id=None)
-        if nidm_input_file:
-            logger.info(f"Found NIDM input file: {nidm_input_file}")
-
         success = nidm_conversion(
             logger=logger,
             derivatives_dir=derivatives_dir,
@@ -664,7 +704,16 @@ def process_session(args, logger):
         return 1
     
     logger.info(f"Processing session {session_label} for subject {participant_label}")
-    
+
+    # Look the NIDM input up before segmenting: an unfetched annex file is an
+    # error, and it should cost seconds, not a GPU segmentation.
+    nidm_input_file = None
+    if not args.skip_nidm:
+        nidm_input_file = find_nidm_input_file(
+            nidm_input_dir, bids_subject, session_id=bids_session, logger=logger)
+        if nidm_input_file:
+            logger.info(f"Found NIDM input file: {nidm_input_file}")
+
     success = True
     
     # Run ANTs segmentation (unless skipped)
@@ -688,11 +737,6 @@ def process_session(args, logger):
 
     # Convert segmentation to NIDM if requested and segmentation succeeded (or skipped)
     if success and not args.skip_nidm:
-        # Find NIDM input file for this subject and session
-        nidm_input_file = find_nidm_input_file(nidm_input_dir, bids_subject, session_id=bids_session)
-        if nidm_input_file:
-            logger.info(f"Found NIDM input file: {nidm_input_file}")
-
         success = nidm_conversion(
             logger=logger,
             derivatives_dir=derivatives_dir,

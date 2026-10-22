@@ -477,6 +477,58 @@ class TestRun(unittest.TestCase):
             mock_instance.run_subject.assert_called_once()
             mock_nidm.assert_not_called()
 
+    def _unfetched_nidm_args(self, session_label):
+        """Args whose NIDM input for sub-01 is an annex symlink with no content."""
+        nidm_in = Path(self.temp_dir) / "NIDM"
+        target = nidm_in / "sub-01" / (f"ses-{session_label}" if session_label else "") / "nidm.ttl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to("../.git/annex/objects/missing")
+
+        class Args:
+            def __init__(self, test_instance):
+                self.bids_dir = test_instance.bids_dir
+                self.output_dir = test_instance.output_dir
+                self.participant_label = "01"
+                self.session_label = session_label
+                self.modality = "T1w"
+                self.max_voxel_size = 2.0
+                self.method = "fusion"
+                self.skip_nidm = False
+                self.skip_ants = False
+                self.ants_input = None
+                self.num_threads = 1
+                self.verbose = True
+                self.skip_bids_validation = True
+                self.nidm_input_dir = str(nidm_in)
+                self.device = "cuda"
+                self.fireants_batch_size = 5
+                self.label_interpolation = "genericlabel"
+
+        return Args(self)
+
+    def test_unfetched_nidm_input_stops_both_levels_before_segmentation(self):
+        """The lookup runs first, so an unfetched input fails in seconds
+        rather than after a GPU segmentation; main() turns the raise into
+        exit 1."""
+        from src.run import NIDMInputNotRetrieved
+
+        for level, session in ((process_participant, None), (process_session, "01")):
+            with self.subTest(level=level.__name__):
+                args = self._unfetched_nidm_args(session)
+                with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+                     patch('src.run.nidm_conversion') as mock_nidm, \
+                     patch('bids.BIDSLayout') as MockBIDSLayout:
+                    mock_layout = MagicMock()
+                    mock_layout.get_subjects.return_value = ['01']
+                    mock_layout.get_sessions.return_value = ['01']
+                    MockBIDSLayout.return_value = mock_layout
+
+                    with self.assertRaises(NIDMInputNotRetrieved):
+                        level(args, self.logger)
+
+                    MockSegmenter.return_value.run_subject.assert_not_called()
+                    mock_nidm.assert_not_called()
+
     def test_process_participant_subject_not_found(self):
         """A participant label absent from the BIDS layout must fail fast,
         before touching the segmenter or the filesystem."""
@@ -861,6 +913,47 @@ class TestRun(unittest.TestCase):
         (sess / "nidm.ttl").write_text("")
         self.assertEqual(find_nidm_input_file(nidm_in, "02", "baseline"),
                          sess / "nidm.ttl")
+
+    def test_unfetched_annex_nidm_input_is_an_error_not_a_miss(self):
+        """A dangling symlink is what datalad leaves before `datalad get`.
+        Falling through to the dataset-level file, or to no input at all,
+        would build nidm.ttl without the subject's demographics and exit 0."""
+        from src.run import NIDMInputNotRetrieved
+
+        nidm_in = Path(self.temp_dir) / "NIDM"
+        (nidm_in / "sub-01").mkdir(parents=True)
+        (nidm_in / "sub-01" / "nidm.ttl").symlink_to(
+            "../.git/annex/objects/missing")
+        (nidm_in / "nidm.ttl").write_text("")
+
+        with self.assertRaises(NIDMInputNotRetrieved):
+            find_nidm_input_file(nidm_in, "01")
+
+        # Only the first candidate present decides: a fetched per-subject
+        # file still wins over a dangling lower-priority one.
+        (nidm_in / "sub-02").mkdir()
+        (nidm_in / "sub-02" / "nidm.ttl").write_text("")
+        (nidm_in / "sub-02.ttl").symlink_to("missing")
+        self.assertEqual(find_nidm_input_file(nidm_in, "02"),
+                         nidm_in / "sub-02" / "nidm.ttl")
+
+    def test_nidm_input_miss_is_logged_as_a_warning(self):
+        import logging
+
+        nidm_in = Path(self.temp_dir) / "NIDM"
+        nidm_in.mkdir()
+        logger = logging.getLogger("ants-nidm-test")
+
+        with self.assertLogs(logger, level="WARNING") as logs:
+            self.assertIsNone(
+                find_nidm_input_file(nidm_in, "01", "baseline", logger=logger))
+        self.assertIn("sub-01 ses-baseline", logs.output[0])
+
+        # No input directory at all is not a miss worth warning about.
+        from unittest.mock import MagicMock
+        quiet = MagicMock()
+        self.assertIsNone(find_nidm_input_file(None, "01", logger=quiet))
+        quiet.warning.assert_not_called()
 
     def test_device_defaults_to_cuda(self):
         import sys
