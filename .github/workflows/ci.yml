@@ -58,6 +58,9 @@ jobs:
         rev=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' ants-nidm_bidsapp:ci)
         echo "org.opencontainers.image.revision=$rev"
         test "$rev" = "${{ github.event.pull_request.head.sha || github.sha }}"
+        ver=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.version" }}' ants-nidm_bidsapp:ci)
+        echo "org.opencontainers.image.version=$ver"
+        test "$ver" = "$(grep -oP '^APP_VERSION = "\K[^"]+' src/run.py)"
     - name: Smoke-test entrypoint
       run: |
         docker run --rm ants-nidm_bidsapp:ci --version

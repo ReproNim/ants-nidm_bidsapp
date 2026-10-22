@@ -65,6 +65,9 @@ echo "=== post-build checks ==="
 rev=$(apptainer inspect --labels "$OUT" | awk '$1 == "org.opencontainers.image.revision:" {print $2}')
 echo "revision label: $rev"
 test "$rev" = "$GIT_COMMIT"
+ver=$(apptainer inspect --labels "$OUT" | awk '$1 == "org.opencontainers.image.version:" {print $2}')
+echo "version label: $ver"
+test "$ver" = "$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' src/run.py)"
 apptainer exec "$OUT" python3 -c "import torch, fireants_fused_ops; print('fused ops OK (post-build)')"
 # FFO_AVAILABLE is the flag src/registration/fireants.py reads at runtime to
 # decide between the fused generic-label sampler and the one-hot fallback, so
