@@ -242,12 +242,12 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     python3 /opt/src/run.py "$@"
 
 %help
-    ANTs BIDS App 0.2.1
+    ANTs BIDS App 0.2.2
 
     This container performs ANTs-based segmentation and converts results to NIDM format.
 
     Version Information:
-    - ANTs BIDS App: 0.2.1
+    - ANTs BIDS App: 0.2.2
     - Python: 3.10
     - Base: nvidia/cuda:12.1.1-devel-ubuntu22.04
 
