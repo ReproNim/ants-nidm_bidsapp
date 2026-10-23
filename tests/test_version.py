@@ -1,9 +1,10 @@
-"""The app version is written in four places; they must agree.
+"""The app version is written in several places; they must agree.
 
-The image's %help, the version stamped into processing_summary.json and the
-zip suffix in the example BABS config are read by different people at
-different times, and a release that bumps only some of them produces
-derivatives whose zip name, summary and image disagree about what ran.
+APP_VERSION (stamped into processing_summary.json), setup.py, the image's
+%help, its version label (Singularity %post and Dockerfile LABEL) and the zip
+suffix in the example BABS config are read by different people at different
+times, and a release that bumps only some of them produces derivatives whose
+zip name, summary and image disagree about what ran.
 """
 import re
 from pathlib import Path
@@ -47,10 +48,12 @@ def test_image_version_label_is_the_app_version():
     singularity = (ROOT / "Singularity").read_text()
     labels = singularity.split("\n%labels\n", 1)[1].split("\n%", 1)[0]
     assert "org.opencontainers.image.version" not in labels
+    # Only %post: the same line in another section would not label the image.
+    post_section = singularity.split("\n%post\n", 1)[1].split("\n%", 1)[0]
     post = re.findall(
         r'^\s+echo "org\.opencontainers\.image\.version (\S+)" '
         r'>> "\$\{APPTAINER_LABELS:-\$SINGULARITY_LABELS\}"$',
-        singularity, re.MULTILINE,
+        post_section, re.MULTILINE,
     )
     assert post == [APP_VERSION]
     docker = re.findall(
