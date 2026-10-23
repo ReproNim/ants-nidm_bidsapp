@@ -51,32 +51,37 @@ echo "commit:  $GIT_COMMIT"
 echo "started: $(date -Is)"
 apptainer --version
 
-# Build to a partial name so an interrupted job never leaves a plausible .sif.
+# Build to a partial name and check it there, so neither an interrupted job nor
+# a failed check leaves a plausible .sif at the release name; the image is
+# renamed only after every check below passes.
 PARTIAL="${OUT}.partial"
 rm -f "$PARTIAL"
 apptainer build --fakeroot --build-arg GIT_COMMIT="$GIT_COMMIT" "$PARTIAL" Singularity
-mv "$PARTIAL" "$OUT"
-echo "built:   $(date -Is)  $(du -h "$OUT" | cut -f1)"
+echo "built:   $(date -Is)  $(du -h "$PARTIAL" | cut -f1)"
 
 # Post-build checks. The %post already asserts the fused ops import (set -e),
 # so a finished SIF implies it passed; re-check from outside anyway, plus the
 # other things tier 2 will need. None of this needs a GPU.
 echo "=== post-build checks ==="
-rev=$(apptainer inspect --labels "$OUT" | awk '$1 == "org.opencontainers.image.revision:" {print $2}')
+rev=$(apptainer inspect --labels "$PARTIAL" | awk '$1 == "org.opencontainers.image.revision:" {print $2}')
 echo "revision label: $rev"
 test "$rev" = "$GIT_COMMIT"
-apptainer exec "$OUT" python3 -c "import torch, fireants_fused_ops; print('fused ops OK (post-build)')"
+ver=$(apptainer inspect --labels "$PARTIAL" | awk '$1 == "org.opencontainers.image.version:" {print $2}')
+echo "version label: $ver"
+test "$ver" = "$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' src/run.py)"
+apptainer exec "$PARTIAL" python3 -c "import torch, fireants_fused_ops; print('fused ops OK (post-build)')"
 # FFO_AVAILABLE is the flag src/registration/fireants.py reads at runtime to
 # decide between the fused generic-label sampler and the one-hot fallback, so
 # assert the exact signal the app will see rather than only the raw import.
-apptainer exec "$OUT" python3 -c "from fireants.interpolator import FFO_AVAILABLE; assert FFO_AVAILABLE, 'FFO_AVAILABLE is False'; print('FFO_AVAILABLE=True')"
-apptainer exec "$OUT" python3 -c "
+apptainer exec "$PARTIAL" python3 -c "from fireants.interpolator import FFO_AVAILABLE; assert FFO_AVAILABLE, 'FFO_AVAILABLE is False'; print('FFO_AVAILABLE=True')"
+apptainer exec "$PARTIAL" python3 -c "
 import torch, fireants, ants
 print('torch', torch.__version__, 'cuda', torch.version.cuda)
 print('fireants', getattr(fireants, '__version__', '?'))
 print('antspy', ants.__version__)
 "
-apptainer exec "$OUT" bash -c 'test -x /opt/ants-bin/antsBrainExtraction.sh && antsRegistration --version | head -2 && command -v bc'
-apptainer exec "$OUT" bash -c 'ls /opt/data/OASIS-TRT-20_brains | wc -l; ls /opt/data/OASIS-TRT-20_DKT31_CMA_labels_v2 | wc -l; ls /opt/data/OASIS-30_Atropos_template | head -3'
-apptainer run "$OUT" --help | head -5
+apptainer exec "$PARTIAL" bash -c 'test -x /opt/ants-bin/antsBrainExtraction.sh && antsRegistration --version | head -2 && command -v bc'
+apptainer exec "$PARTIAL" bash -c 'ls /opt/data/OASIS-TRT-20_brains | wc -l; ls /opt/data/OASIS-TRT-20_DKT31_CMA_labels_v2 | wc -l; ls /opt/data/OASIS-30_Atropos_template | head -3'
+apptainer run "$PARTIAL" --help | head -5
+mv "$PARTIAL" "$OUT"
 echo "ALL CHECKS PASSED $(date -Is)"
