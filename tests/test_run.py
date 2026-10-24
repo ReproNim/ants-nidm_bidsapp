@@ -1412,6 +1412,33 @@ class TestRun(unittest.TestCase):
         with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
             parse_arguments()
 
+    def test_missing_explicit_nidm_input_dir_is_rejected(self):
+        """An explicit --nidm-input-dir that is not a directory is a typo or a
+        missing mount; it used to warn and build NIDM without the input. An
+        existing (even empty) directory is accepted, and the default stays
+        unchecked because BABS relies on it being optional."""
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        base = ["ants-nidm", "/bids", "/out", "participant"]
+        missing = Path(self.temp_dir) / "no_such_nidm"
+        a_file = Path(self.temp_dir) / "nidm.ttl"
+        a_file.write_text("")
+        for bad in (missing, a_file):
+            with self.subTest(path=bad.name), \
+                 patch.object(sys, "argv", base + ["--nidm-input-dir", str(bad)]), \
+                 self.assertRaises(SystemExit):
+                parse_arguments()
+
+        empty = Path(self.temp_dir) / "empty_nidm"
+        empty.mkdir()
+        with patch.object(sys, "argv", base + ["--nidm-input-dir", str(empty)]):
+            self.assertEqual(parse_arguments().nidm_input_dir, str(empty))
+        with patch.object(sys, "argv", base):
+            self.assertIsNone(parse_arguments().nidm_input_dir)
+
     def test_prob_threshold_is_rejected(self):
         """--prob-threshold was accepted but never read by either method, so a
         value passed to it changed nothing. It is now an unknown argument."""

@@ -443,6 +443,12 @@ def parse_arguments():
         args.method = 'fusion'
     if args.fireants_batch_size < 0:
         parser.error("--fireants-batch-size must be >= 0 (0 means all atlases at once)")
+    # An explicit --nidm-input-dir that is not there is a typo or a missing
+    # mount, not a subject without NIDM: fail before any processing instead
+    # of building NIDM without the input. The default (<bids_dir>/../NIDM,
+    # what BABS relies on) may still be absent.
+    if args.nidm_input_dir is not None and not Path(args.nidm_input_dir).is_dir():
+        parser.error(f"--nidm-input-dir {args.nidm_input_dir} is not a directory")
 
     return args
 
@@ -467,11 +473,9 @@ def initialize(args):
     else:
         nidm_input_dir = Path(args.nidm_input_dir)
 
+    # parse_arguments() already rejected a missing explicit --nidm-input-dir;
+    # only the default location can be absent here.
     if not nidm_input_dir.exists():
-        if args.nidm_input_dir is not None:
-            logging.getLogger('ants-nidm').warning(
-                f"--nidm-input-dir {nidm_input_dir} does not exist; "
-                "NIDM will be built without an input document")
         nidm_input_dir = None
 
     # Per-subject output layout (study-wide standard): everything this app
