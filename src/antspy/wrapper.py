@@ -189,7 +189,7 @@ class ANTsSegmentation:
             raise ValueError("Output directory must be specified")
         if not self.template_dir.exists():
             self.logger.error(f"Template directory not found: {self.template_dir}")
-            self.logger.error(f"Contents of /opt/data: {list(base_data_dir.iterdir()) if base_data_dir.exists() else 'Directory not found'}")
+            self.logger.error(f"Contents of {base_data_dir}: {list(base_data_dir.iterdir()) if base_data_dir.exists() else 'Directory not found'}")
             raise ValueError(f"Template directory not found: {self.template_dir}")
         
         # Create necessary directories
