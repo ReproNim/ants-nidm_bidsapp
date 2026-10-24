@@ -1426,11 +1426,24 @@ class TestRun(unittest.TestCase):
         missing = Path(self.temp_dir) / "no_such_nidm"
         a_file = Path(self.temp_dir) / "nidm.ttl"
         a_file.write_text("")
-        for bad in (missing, a_file):
-            with self.subTest(path=bad.name), \
-                 patch.object(sys, "argv", base + ["--nidm-input-dir", str(bad)]), \
+        # "" is what an unset variable in a wrapper passes; it must not
+        # silently mean the current directory.
+        for bad in (str(missing), str(a_file), ""):
+            with self.subTest(path=bad), \
+                 patch.object(sys, "argv", base + ["--nidm-input-dir", bad]), \
                  self.assertRaises(SystemExit):
                 parse_arguments()
+
+        # Unreadable: a usage error now, not a PermissionError mid-run.
+        if os.geteuid() != 0:
+            locked = Path(self.temp_dir) / "locked_nidm"
+            locked.mkdir(mode=0)
+            try:
+                with patch.object(sys, "argv", base + ["--nidm-input-dir", str(locked)]), \
+                     self.assertRaises(SystemExit):
+                    parse_arguments()
+            finally:
+                locked.chmod(0o700)
 
         empty = Path(self.temp_dir) / "empty_nidm"
         empty.mkdir()
