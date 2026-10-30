@@ -229,6 +229,7 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
     class FakeAffine:
         def __init__(self, scales, iterations, fixed_batch, moving_batch, **kwargs):
             seen["affine"] = (fixed_batch, moving_batch)
+            seen["init_rigid"] = kwargs.get("init_rigid")
 
         def optimize(self):
             pass
@@ -244,9 +245,11 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
     )
     monkeypatch.setitem(sys.modules, "fireants.registration.affine", fake_affine)
 
+    init = object()
+
     def record_moments(fixed_batch, moving_batch):
         seen["fixed"], seen["moving"] = fixed_batch, moving_batch
-        return None
+        return init
 
     def record_deformable(fixed_batch, moving_batch, affine):
         seen["deformable"] = (fixed_batch, moving_batch)
@@ -278,3 +281,7 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
         fixed_batch, moving_batch = seen[stage]
         assert fixed_batch.channels == [2], stage
         assert moving_batch.channels == [2], stage
+        assert fixed_batch.images[0].path.endswith("tpl_subject.nii.gz"), stage
+        assert moving_batch.images[0].path.endswith("tpl_template.nii.gz"), stage
+    # The init computed from the plain images is the one the affine starts from.
+    assert seen["init_rigid"] is init
