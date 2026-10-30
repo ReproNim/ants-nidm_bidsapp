@@ -405,7 +405,10 @@ def warp_atlases(
     _assert_inbound(target_geom, fixed, "target crossing into FireANTs")
     reference_itk = fixed.itk_image
     # Moments (centre of mass) is computed on the plain image; the masked loss,
-    # if enabled, sees image + brain-mask channels.
+    # if enabled, sees image + brain-mask channels. Order matters:
+    # _with_mask_channel concatenates onto the Image in place, and
+    # BatchedImages snapshots the tensor when it is built, so the plain
+    # batches must be built first.
     moments_fixed_batch = BatchedImages([fixed])
     if LOSS_MASKED:
         mask_path = write_nifti(target_mask, temp_dir / "target_mask.nii.gz")
@@ -654,6 +657,12 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     # construction, so it is the one worth asserting.
     _assert_inbound(subject_geom, fixed, "subject crossing into FireANTs")
     _assert_inbound(template_geom, moving, "template crossing into FireANTs")
+    # Moments (centre of mass) is computed on the plain images, as in
+    # warp_atlases: MomentsRegistration sums over channels, so handing it the
+    # masked-loss batches would weight the centre of mass by intensity + mask.
+    # Compute it before _with_mask_channel, which concatenates onto the Image
+    # in place, so the init never depends on which tensor a batch kept.
+    init_rigid = _moments_init(BatchedImages([fixed]), BatchedImages([moving]))
     if LOSS_MASKED:
         fixed_batch = BatchedImages([_with_mask_channel(fixed)])
         moving_batch = BatchedImages([_with_mask_channel(moving)])
@@ -680,7 +689,7 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
         optimizer="Adam",
         optimizer_lr=AFFINE_LR,
         cc_kernel_size=CC_KERNEL_SIZE,
-        init_rigid=_moments_init(fixed_batch, moving_batch),
+        init_rigid=init_rigid,
         **_loss_kwargs(),
     )
     affine.optimize()
