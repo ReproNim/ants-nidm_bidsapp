@@ -44,10 +44,15 @@ def main():
 
     fixed = Image.load_file(str(subject_path), device="cpu")
     moving = Image.load_file(str(template_path), device="cpu")
+    # Plain batches first: _with_mask_channel concatenates onto the Image in
+    # place, and BatchedImages snapshots the tensor at construction.
+    plain_f, plain_m = BatchedImages([fixed]), BatchedImages([moving])
+    masked_f = BatchedImages([reg._with_mask_channel(fixed)])
+    masked_m = BatchedImages([reg._with_mask_channel(moving)])
+    assert plain_f().shape[1] == 1 and masked_f().shape[1] == 2
     inits = {
-        "old": reg._moments_init(BatchedImages([reg._with_mask_channel(fixed)]),
-                                 BatchedImages([reg._with_mask_channel(moving)])),
-        "new": reg._moments_init(BatchedImages([fixed]), BatchedImages([moving])),
+        "old": reg._moments_init(masked_f, masked_m),
+        "new": reg._moments_init(plain_f, plain_m),
     }
     result = {k: v.cpu().numpy().tolist() for k, v in inits.items()}
     told = inits["old"][0, :, -1]
