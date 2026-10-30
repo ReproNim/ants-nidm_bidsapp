@@ -20,7 +20,7 @@ subject it reports
 
 Usage:
     python scripts/diag_quick_moments_init.py --runs <runs> --fusion-dir <dir> \
-        [--com-dir <dir>] [--logs <glob>] \
+        [--com-dir <dir>] [--logs '<glob>'] \
         --out <csv_prefix> 0051456 0051457 ...
 """
 import argparse

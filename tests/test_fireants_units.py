@@ -224,9 +224,11 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
             # fireants' BatchedImages snapshots the tensor at construction.
             self.channels = [i.channels for i in self.images]
 
+    seen = {}
+
     class FakeAffine:
-        def __init__(self, *args, **kwargs):
-            pass
+        def __init__(self, scales, iterations, fixed_batch, moving_batch, **kwargs):
+            seen["affine"] = (fixed_batch, moving_batch)
 
         def optimize(self):
             pass
@@ -242,24 +244,26 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
     )
     monkeypatch.setitem(sys.modules, "fireants.registration.affine", fake_affine)
 
-    seen = {}
-
     def record_moments(fixed_batch, moving_batch):
         seen["fixed"], seen["moving"] = fixed_batch, moving_batch
         return None
 
-    monkeypatch.setattr(mod, "LOSS_MASKED", True)
-    monkeypatch.setattr(mod, "_moments_init", record_moments)
+    def record_deformable(fixed_batch, moving_batch, affine):
+        seen["deformable"] = (fixed_batch, moving_batch)
+        return types.SimpleNamespace(optimize=lambda: None)
+
     def add_mask_channel(img, *args):
         # Like Image.concatenate: mutates and returns the same Image.
         img.channels += 1
         return img
 
+    monkeypatch.setattr(mod, "LOSS_MASKED", True)
+    monkeypatch.setattr(mod, "_moments_init", record_moments)
     monkeypatch.setattr(mod, "_with_mask_channel", add_mask_channel)
     monkeypatch.setattr(mod, "geometry_of", lambda img: None)
     monkeypatch.setattr(mod, "write_nifti", lambda img, path: path)
     monkeypatch.setattr(mod, "_assert_inbound", lambda *a: None)
-    monkeypatch.setattr(mod, "_deformable_registration", lambda *a: FakeAffine())
+    monkeypatch.setattr(mod, "_deformable_registration", record_deformable)
     monkeypatch.setattr(mod, "folding_fraction", lambda *a: [0.0])
     monkeypatch.setattr(mod, "_refuse_folding", lambda *a: None)
 
@@ -269,3 +273,8 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
     assert seen["moving"].channels == [1]
     assert seen["fixed"].images[0].path.endswith("tpl_subject.nii.gz")
     assert seen["moving"].images[0].path.endswith("tpl_template.nii.gz")
+    # The masked loss still sees image + mask on both sides, in both stages.
+    for stage in ("affine", "deformable"):
+        fixed_batch, moving_batch = seen[stage]
+        assert fixed_batch.channels == [2], stage
+        assert moving_batch.channels == [2], stage

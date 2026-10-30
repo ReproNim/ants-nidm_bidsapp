@@ -660,15 +660,14 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     # Moments (centre of mass) is computed on the plain images, as in
     # warp_atlases: MomentsRegistration sums over channels, so handing it the
     # masked-loss batches would weight the centre of mass by intensity + mask.
-    # Build these before _with_mask_channel, which concatenates onto the Image
-    # in place (BatchedImages snapshots the tensor at construction).
-    moments_fixed_batch = BatchedImages([fixed])
-    moments_moving_batch = BatchedImages([moving])
+    # Compute it before _with_mask_channel, which concatenates onto the Image
+    # in place, so the init never depends on which tensor a batch kept.
+    init_rigid = _moments_init(BatchedImages([fixed]), BatchedImages([moving]))
     if LOSS_MASKED:
         fixed_batch = BatchedImages([_with_mask_channel(fixed)])
         moving_batch = BatchedImages([_with_mask_channel(moving)])
     else:
-        fixed_batch, moving_batch = moments_fixed_batch, moments_moving_batch
+        fixed_batch, moving_batch = BatchedImages([fixed]), BatchedImages([moving])
 
     # Both sides are skull-stripped brain-only images (the docstring above:
     # `template` is T_template0_BrainCerebellum, not the whole head), so this
@@ -690,7 +689,7 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
         optimizer="Adam",
         optimizer_lr=AFFINE_LR,
         cc_kernel_size=CC_KERNEL_SIZE,
-        init_rigid=_moments_init(moments_fixed_batch, moments_moving_batch),
+        init_rigid=init_rigid,
         **_loss_kwargs(),
     )
     affine.optimize()

@@ -15,7 +15,7 @@
 #     scripts/diag_quick_moments_init.sbatch \
 #     <sif> <bids_dir> <out_root> <old_ref> <new_ref> <participant> [<participant> ...]
 #
-# Outputs: <out_root>/<variant>/sub-<id>/... and <out_root>/src/<variant>/
+# Outputs: <out_root>/<variant>/sub-<id>/... and <out_root>/src/task<N>/{old,new}/
 # (the exact src/ each variant ran, with the commit in SRC_COMMIT).
 #SBATCH --job-name=ants-quick-moments
 #SBATCH --gres=gpu:1
