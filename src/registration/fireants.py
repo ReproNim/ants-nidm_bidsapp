@@ -654,11 +654,16 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     # construction, so it is the one worth asserting.
     _assert_inbound(subject_geom, fixed, "subject crossing into FireANTs")
     _assert_inbound(template_geom, moving, "template crossing into FireANTs")
+    # Moments (centre of mass) is computed on the plain images, as in
+    # warp_atlases: MomentsRegistration sums over channels, so handing it the
+    # masked-loss batches would weight the centre of mass by intensity + mask.
+    moments_fixed_batch = BatchedImages([fixed])
+    moments_moving_batch = BatchedImages([moving])
     if LOSS_MASKED:
         fixed_batch = BatchedImages([_with_mask_channel(fixed)])
         moving_batch = BatchedImages([_with_mask_channel(moving)])
     else:
-        fixed_batch, moving_batch = BatchedImages([fixed]), BatchedImages([moving])
+        fixed_batch, moving_batch = moments_fixed_batch, moments_moving_batch
 
     # Both sides are skull-stripped brain-only images (the docstring above:
     # `template` is T_template0_BrainCerebellum, not the whole head), so this
@@ -680,7 +685,7 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
         optimizer="Adam",
         optimizer_lr=AFFINE_LR,
         cc_kernel_size=CC_KERNEL_SIZE,
-        init_rigid=_moments_init(fixed_batch, moving_batch),
+        init_rigid=_moments_init(moments_fixed_batch, moments_moving_batch),
         **_loss_kwargs(),
     )
     affine.optimize()
