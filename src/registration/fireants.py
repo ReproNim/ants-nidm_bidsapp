@@ -405,7 +405,10 @@ def warp_atlases(
     _assert_inbound(target_geom, fixed, "target crossing into FireANTs")
     reference_itk = fixed.itk_image
     # Moments (centre of mass) is computed on the plain image; the masked loss,
-    # if enabled, sees image + brain-mask channels.
+    # if enabled, sees image + brain-mask channels. Order matters:
+    # _with_mask_channel concatenates onto the Image in place, and
+    # BatchedImages snapshots the tensor when it is built, so the plain
+    # batches must be built first.
     moments_fixed_batch = BatchedImages([fixed])
     if LOSS_MASKED:
         mask_path = write_nifti(target_mask, temp_dir / "target_mask.nii.gz")
@@ -657,6 +660,8 @@ def register_to_template(subject, template, *, temp_dir, device="cuda", logger=N
     # Moments (centre of mass) is computed on the plain images, as in
     # warp_atlases: MomentsRegistration sums over channels, so handing it the
     # masked-loss batches would weight the centre of mass by intensity + mask.
+    # Build these before _with_mask_channel, which concatenates onto the Image
+    # in place (BatchedImages snapshots the tensor at construction).
     moments_fixed_batch = BatchedImages([fixed])
     moments_moving_batch = BatchedImages([moving])
     if LOSS_MASKED:

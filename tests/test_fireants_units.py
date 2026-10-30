@@ -196,8 +196,10 @@ def test_seg_preprocessor_leaves_ids_absent_from_the_map_at_zero(tmp_path):
 # (fireants 1.5.0 registration/moments.py, optimize_helper), so the masked-loss
 # batches -- intensity plus a trailing brain-mask channel -- would weight the
 # centre of mass by intensity + mask. Both registrations must give moments the
-# plain single-channel images. Runs without torch or fireants: the fireants
-# modules imported inside register_to_template are replaced by recorders.
+# plain single-channel images. Image.concatenate (inside _with_mask_channel)
+# mutates the Image in place while BatchedImages snapshots its tensor when
+# built, so the plain batches must exist before the mask channel is added; the
+# fakes reproduce both. Runs without torch or fireants.
 # --------------------------------------------------------------------------
 
 def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypatch):
@@ -210,6 +212,7 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
         def __init__(self, path):
             self.path = path
             self.itk_image = object()
+            self.channels = 1
 
         @classmethod
         def load_file(cls, path, device=None):
@@ -218,6 +221,8 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
     class FakeBatch:
         def __init__(self, images):
             self.images = list(images)
+            # fireants' BatchedImages snapshots the tensor at construction.
+            self.channels = [i.channels for i in self.images]
 
     class FakeAffine:
         def __init__(self, *args, **kwargs):
@@ -245,7 +250,12 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
 
     monkeypatch.setattr(mod, "LOSS_MASKED", True)
     monkeypatch.setattr(mod, "_moments_init", record_moments)
-    monkeypatch.setattr(mod, "_with_mask_channel", lambda img, *a: ("masked", img))
+    def add_mask_channel(img, *args):
+        # Like Image.concatenate: mutates and returns the same Image.
+        img.channels += 1
+        return img
+
+    monkeypatch.setattr(mod, "_with_mask_channel", add_mask_channel)
     monkeypatch.setattr(mod, "geometry_of", lambda img: None)
     monkeypatch.setattr(mod, "write_nifti", lambda img, path: path)
     monkeypatch.setattr(mod, "_assert_inbound", lambda *a: None)
@@ -255,8 +265,7 @@ def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypa
 
     mod.register_to_template(object(), object(), temp_dir=tmp_path, device="cpu")
 
-    fixed_images, moving_images = seen["fixed"].images, seen["moving"].images
-    assert [type(i) for i in fixed_images] == [FakeImage]
-    assert [type(i) for i in moving_images] == [FakeImage]
-    assert fixed_images[0].path.endswith("tpl_subject.nii.gz")
-    assert moving_images[0].path.endswith("tpl_template.nii.gz")
+    assert seen["fixed"].channels == [1]
+    assert seen["moving"].channels == [1]
+    assert seen["fixed"].images[0].path.endswith("tpl_subject.nii.gz")
+    assert seen["moving"].images[0].path.endswith("tpl_template.nii.gz")
