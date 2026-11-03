@@ -681,6 +681,9 @@ class TestANTsSegmentation(unittest.TestCase):
             'missing label map': lambda: (labels / 'OASIS-TRT-20-7_DKT31_CMA_labels.nii.gz').unlink(),
             'brain with no label map': lambda: (labels / 'OASIS-TRT-20-7_DKT31_CMA_labels.nii.gz').rename(
                 labels / 'OASIS-TRT-20-21_DKT31_CMA_labels.nii.gz'),
+            'label map with no brain': lambda: (brains / 'OASIS-TRT-20-7_brain.nii.gz').rename(
+                brains / 'OASIS-TRT-20-21_brain.nii.gz'),
+            'two brains for one atlas': lambda: (brains / 'OASIS-TRT-20-7_brain_old.nii.gz').touch(),
         }
         for name, break_tree in cases.items():
             with self.subTest(name):

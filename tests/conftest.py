@@ -86,10 +86,14 @@ _repo_data_dir = os.path.join(project_root, 'data')
 
 def _data_dir_state():
     state = {}
-    for root, dirs, files in os.walk(_repo_data_dir):
+    # Follow symlinks: data/ is often a set of links to a shared atlas copy.
+    for root, dirs, files in os.walk(_repo_data_dir, followlinks=True):
         for name in dirs + files:
             path = os.path.join(root, name)
-            st = os.lstat(path)
+            try:
+                st = os.stat(path)
+            except OSError:  # dangling link
+                st = os.lstat(path)
             state[os.path.relpath(path, _repo_data_dir)] = (st.st_size, st.st_mtime_ns)
     return os.path.exists(_repo_data_dir), state
 

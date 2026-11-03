@@ -13,8 +13,6 @@ import numpy as np
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
-# Check if running in CI environment
-IN_CI = os.environ.get('CI', 'false').lower() == 'true'
 
 # Mock the external dependencies
 mock_ants = MagicMock()

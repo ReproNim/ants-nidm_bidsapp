@@ -472,7 +472,10 @@ class ANTsSegmentation:
                 raise ValueError(f"No label images found in {self.labels_dir}")
                 
             self.logger.info(f"Found {len(T1s)} atlas T1 images and {len(labels)} label images")
-            T1s, labels = _pair_atlases(T1s, labels)
+            try:
+                T1s, labels = _pair_atlases(T1s, labels)
+            except ValueError as e:
+                raise ValueError(f"{e} (brains in {self.atlas_dir}, label maps in {self.labels_dir})") from None
                 
             # Registration is FireANTs; the fusion voting below stays on ANTs.
             # Images cross the boundary as NIfTI files under temp_dir and are
