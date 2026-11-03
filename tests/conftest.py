@@ -105,12 +105,25 @@ def _data_dir_state():
     return os.path.exists(_repo_data_dir), state
 
 
-@pytest.fixture(autouse=True)
-def _repo_data_dir_untouched():
-    before = _data_dir_state()
-    yield
+def _fail_if_changed(before, what):
     after = _data_dir_state()
     if after != before:
         changed = sorted(set(before[1].items()) ^ set(after[1].items()))
         names = sorted({rel for rel, _ in changed}) or ['data/ itself']
-        pytest.fail(f"test modified the repository's data/ directory: {names[:10]}")
+        pytest.fail(f"{what} modified the repository's data/ directory: {names[:10]}")
+
+
+@pytest.fixture(autouse=True, scope='session')
+def _repo_data_dir_untouched_by_session():
+    # Catches writes outside test functions too (setUpClass, module or
+    # class fixtures), which the per-test check below runs too late to see.
+    before = _data_dir_state()
+    yield
+    _fail_if_changed(before, "the test session")
+
+
+@pytest.fixture(autouse=True)
+def _repo_data_dir_untouched():
+    before = _data_dir_state()
+    yield
+    _fail_if_changed(before, "test")

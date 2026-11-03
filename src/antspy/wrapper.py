@@ -1,5 +1,6 @@
 # src/ants/wrapper.py
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -51,10 +52,17 @@ def _default_data_dir():
     return Path('/opt/data')
 
 
+_ATLAS_ID = re.compile(r'^(OASIS-TRT-20-\d+)_')
+
+
 def _atlas_id(path):
     """'OASIS-TRT-20-7' from '.../OASIS-TRT-20-7_brain.nii.gz' or
-    '.../OASIS-TRT-20-7_DKT31_CMA_labels.nii.gz'."""
-    return Path(path).name.split('_', 1)[0]
+    '.../OASIS-TRT-20-7_DKT31_CMA_labels.nii.gz'. Any other file name in an
+    atlas directory (a macOS '._' copy, a stray image) raises ValueError."""
+    match = _ATLAS_ID.match(Path(path).name)
+    if not match:
+        raise ValueError(f"Unrecognised file in an atlas directory: {Path(path).name}")
+    return match.group(1)
 
 
 def _pair_atlases(brains, labels):

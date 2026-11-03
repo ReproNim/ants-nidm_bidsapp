@@ -60,9 +60,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     seg = ANTsSegmentation(bids_dir=str(out), output_dir=str(out), num_threads=a.num_threads,
                            device="cuda", fireants_batch_size=a.batch_size, verbose=True)
-    from src.antspy.wrapper import _pair_atlases
-    T1s, labels = _pair_atlases([str(p) for p in seg.atlas_dir.glob("*.nii.gz")],
-                                [str(p) for p in seg.labels_dir.glob("*.nii.gz")])
+    T1s, labels = seg._fusion_atlases()
     assert len(T1s) == len(labels) == 20, (len(T1s), len(labels))
     k = a.fold - 1
     held_t1, held_lab = T1s[k], labels[k]

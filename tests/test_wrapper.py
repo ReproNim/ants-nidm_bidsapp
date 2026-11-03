@@ -671,6 +671,16 @@ class TestANTsSegmentation(unittest.TestCase):
             self.assertEqual(Path(label).name,
                              f"OASIS-TRT-20-{k}_DKT31_CMA_labels.nii.gz")
 
+    def test_fusion_refuses_an_unrecognised_file_in_an_atlas_directory(self):
+        """A stray image in an atlas directory has no atlas id; it is named in
+        the error rather than treated as an atlas of its own."""
+        brains = self.data_dir / 'OASIS-TRT-20_brains'
+        (brains / 'T1_copy.nii.gz').touch()
+        with patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct:
+            with self.assertRaisesRegex(ValueError, "Unrecognised file .*T1_copy.nii.gz"):
+                self.segmenter.segment_image(mock_image_read(), method="fusion")
+        mock_ct.assert_not_called()
+
     def test_fusion_refuses_atlases_without_a_matching_label_map(self):
         """Brains and label maps are paired by atlas id. With one file missing
         or unmatched, pairing two sorted lists by position would warp every
