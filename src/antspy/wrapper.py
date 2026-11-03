@@ -51,6 +51,40 @@ def _default_data_dir():
     return Path('/opt/data')
 
 
+def _atlas_id(path):
+    """'OASIS-TRT-20-7' from '.../OASIS-TRT-20-7_brain.nii.gz' or
+    '.../OASIS-TRT-20-7_DKT31_CMA_labels.nii.gz'."""
+    return Path(path).name.split('_', 1)[0]
+
+
+def _pair_atlases(brains, labels):
+    """Pair each atlas brain with the label map of the same atlas.
+
+    Returns two lists in the same atlas order. Raises ValueError, naming the
+    atlases, when an id is duplicated or has a brain without a label map or
+    the reverse: pairing by list position would then give every later brain
+    the next atlas's labels, and fusion would still run to completion.
+    """
+    by_id = {}
+    for kind, paths in (('brain', brains), ('label map', labels)):
+        ids = [_atlas_id(p) for p in paths]
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        if dupes:
+            raise ValueError(f"More than one atlas {kind} for: {', '.join(dupes)}")
+        by_id[kind] = dict(zip(ids, paths))
+    no_label = sorted(set(by_id['brain']) - set(by_id['label map']))
+    no_brain = sorted(set(by_id['label map']) - set(by_id['brain']))
+    if no_label or no_brain:
+        parts = []
+        if no_label:
+            parts.append(f"no label map for {', '.join(no_label)}")
+        if no_brain:
+            parts.append(f"no brain for {', '.join(no_brain)}")
+        raise ValueError(f"Atlas brains and label maps do not pair up: {'; '.join(parts)}")
+    ids = natsorted(by_id['brain'])
+    return [by_id['brain'][i] for i in ids], [by_id['label map'][i] for i in ids]
+
+
 class ANTsSegmentation:
     """
     Wrapper class for ANTs segmentation functionality using ANTsPy.
@@ -438,8 +472,7 @@ class ANTsSegmentation:
                 raise ValueError(f"No label images found in {self.labels_dir}")
                 
             self.logger.info(f"Found {len(T1s)} atlas T1 images and {len(labels)} label images")
-            if len(T1s) != len(labels):
-                self.logger.warning(f"Number of atlas images ({len(T1s)}) does not match number of labels ({len(labels)})")
+            T1s, labels = _pair_atlases(T1s, labels)
                 
             # Registration is FireANTs; the fusion voting below stays on ANTs.
             # Images cross the boundary as NIfTI files under temp_dir and are

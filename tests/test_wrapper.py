@@ -671,6 +671,33 @@ class TestANTsSegmentation(unittest.TestCase):
             self.assertEqual(Path(label).name,
                              f"OASIS-TRT-20-{k}_DKT31_CMA_labels.nii.gz")
 
+    def test_fusion_refuses_atlases_without_a_matching_label_map(self):
+        """Brains and label maps are paired by atlas id. With one file missing
+        or unmatched, pairing two sorted lists by position would warp every
+        later brain with the next atlas's labels and still exit 0."""
+        brains = self.data_dir / 'OASIS-TRT-20_brains'
+        labels = self.data_dir / 'OASIS-TRT-20_DKT31_CMA_labels_v2'
+        cases = {
+            'missing label map': lambda: (labels / 'OASIS-TRT-20-7_DKT31_CMA_labels.nii.gz').unlink(),
+            'brain with no label map': lambda: (labels / 'OASIS-TRT-20-7_DKT31_CMA_labels.nii.gz').rename(
+                labels / 'OASIS-TRT-20-21_DKT31_CMA_labels.nii.gz'),
+        }
+        for name, break_tree in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(self.data_dir)
+                make_fake_data_dir(self.data_dir)
+                break_tree()
+                with patch("src.antspy.wrapper.warp_atlases") as mock_warp, \
+                     patch.object(self.segmenter, "compute_cortical_thickness") as mock_ct:
+                    mock_ct.return_value = {
+                        "BrainSegmentationN4": mock_image_read(),
+                        "BrainExtractionMask": mock_image_read(),
+                        "TemplateWarp": object(),
+                    }
+                    with self.assertRaisesRegex(ValueError, "OASIS-TRT-20-7"):
+                        self.segmenter.segment_image(mock_image_read(), method="fusion")
+                mock_warp.assert_not_called()
+
     def test_only_quick_registers_to_the_template(self):
         """The subject-to-template warp is used by 'quick' alone. Under
         'fusion' it was one more GPU registration whose result stayed on the
