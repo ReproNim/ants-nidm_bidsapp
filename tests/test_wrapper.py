@@ -702,6 +702,8 @@ class TestANTsSegmentation(unittest.TestCase):
                 message = str(raised.exception)
                 self.assertIn(str(brains), message)
                 self.assertIn(str(labels), message)
+                if name == 'two brains for one atlas':
+                    self.assertIn('OASIS-TRT-20-7_brain_old.nii.gz', message)
                 # fails before preprocessing, not minutes into it
                 mock_ct.assert_not_called()
                 mock_warp.assert_not_called()
