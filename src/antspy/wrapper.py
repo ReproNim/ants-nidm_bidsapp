@@ -57,8 +57,9 @@ _ATLAS_ID = re.compile(r'^(OASIS-TRT-20-\d+)_')
 
 def _atlas_id(path):
     """'OASIS-TRT-20-7' from '.../OASIS-TRT-20-7_brain.nii.gz' or
-    '.../OASIS-TRT-20-7_DKT31_CMA_labels.nii.gz'. Any other file name in an
-    atlas directory (a macOS '._' copy, a stray image) raises ValueError."""
+    '.../OASIS-TRT-20-7_DKT31_CMA_labels.nii.gz'. Any other file name (a stray
+    image in an atlas directory) raises ValueError; dotfiles never reach here,
+    because the atlas listing skips them."""
     match = _ATLAS_ID.match(Path(path).name)
     if not match:
         raise ValueError(f"Unrecognised file in an atlas directory: {Path(path).name}")
