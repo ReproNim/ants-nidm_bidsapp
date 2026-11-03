@@ -74,3 +74,32 @@ def restore_real_ants():
     finally:
         if previous is not None:
             sys.modules['ants'] = previous
+
+
+# Outside the container the app reads its templates and atlases from data/ at
+# the repository root. Tests must build a fake tree in a temp dir instead
+# (see make_fake_data_dir in test_wrapper.py): a test that wrote placeholder
+# files there once replaced the real OASIS-30 template and priors, and every
+# later local run read text files as images.
+_repo_data_dir = os.path.join(project_root, 'data')
+
+
+def _data_dir_state():
+    state = {}
+    for root, dirs, files in os.walk(_repo_data_dir):
+        for name in dirs + files:
+            path = os.path.join(root, name)
+            st = os.lstat(path)
+            state[os.path.relpath(path, _repo_data_dir)] = (st.st_size, st.st_mtime_ns)
+    return os.path.exists(_repo_data_dir), state
+
+
+@pytest.fixture(autouse=True)
+def _repo_data_dir_untouched():
+    before = _data_dir_state()
+    yield
+    after = _data_dir_state()
+    if after != before:
+        changed = sorted(set(before[1].items()) ^ set(after[1].items()))
+        names = sorted({rel for rel, _ in changed}) or ['data/ itself']
+        pytest.fail(f"test modified the repository's data/ directory: {names[:10]}")
