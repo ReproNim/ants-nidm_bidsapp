@@ -70,7 +70,8 @@ def _pair_atlases(brains, labels):
         ids = [_atlas_id(p) for p in paths]
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         if dupes:
-            raise ValueError(f"More than one atlas {kind} for: {', '.join(dupes)}")
+            files = [Path(p).name for p in paths if _atlas_id(p) in dupes]
+            raise ValueError(f"More than one atlas {kind} for {', '.join(dupes)}: {', '.join(files)}")
         by_id[kind] = dict(zip(ids, paths))
     no_label = sorted(set(by_id['brain']) - set(by_id['label map']))
     no_brain = sorted(set(by_id['label map']) - set(by_id['brain']))
@@ -393,6 +394,33 @@ class ANTsSegmentation:
         
         return brain_image
     
+    def _fusion_atlases(self):
+        """The atlas brains and their label maps, paired by atlas id."""
+        if not self.atlas_dir.exists():
+            self.logger.error(f"Atlas directory not found: {self.atlas_dir}")
+            raise ValueError(f"Atlas directory not found: {self.atlas_dir}. Cannot use 'fusion' method.")
+        if not self.labels_dir.exists():
+            self.logger.error(f"Labels directory not found: {self.labels_dir}")
+            raise ValueError(f"Labels directory not found: {self.labels_dir}. Cannot use 'fusion' method.")
+
+        T1s = natsorted(glob.glob(str(self.atlas_dir / '*.nii.gz')))
+        labels = natsorted(glob.glob(str(self.labels_dir / '*.nii.gz')))
+
+        if not T1s:
+            self.logger.error(f"No atlas T1 images found in {self.atlas_dir}")
+            self.logger.error(f"Directory contents: {list(self.atlas_dir.iterdir())[:5]}")
+            raise ValueError(f"No atlas T1 images found in {self.atlas_dir}")
+        if not labels:
+            self.logger.error(f"No label images found in {self.labels_dir}")
+            self.logger.error(f"Directory contents: {list(self.labels_dir.iterdir())[:5]}")
+            raise ValueError(f"No label images found in {self.labels_dir}")
+
+        self.logger.info(f"Found {len(T1s)} atlas T1 images and {len(labels)} label images")
+        try:
+            return _pair_atlases(T1s, labels)
+        except ValueError as e:
+            raise ValueError(f"{e} (brains in {self.atlas_dir}, label maps in {self.labels_dir})") from None
+
     def segment_image(self, image, method='fusion', **kwargs):
         """Perform ANTs segmentation on the given image.
         
@@ -412,6 +440,10 @@ class ANTsSegmentation:
         dict
             Dictionary containing segmentation results
         """
+        # Check the atlas tree before minutes of preprocessing, so a broken
+        # image fails every subject of an array at once.
+        fusion_atlases = self._fusion_atlases() if method == 'fusion' else None
+
         # Run cortical thickness to get N4 correction and brain mask
         self.logger.info("Running cortical thickness pipeline for preprocessing")
         thickness_results = self.compute_cortical_thickness(
@@ -451,31 +483,7 @@ class ANTsSegmentation:
             }
             
         elif method == 'fusion':
-            if not self.atlas_dir.exists():
-                self.logger.error(f"Atlas directory not found: {self.atlas_dir}")
-                raise ValueError(f"Atlas directory not found: {self.atlas_dir}. Cannot use 'fusion' method.")
-            if not self.labels_dir.exists():
-                self.logger.error(f"Labels directory not found: {self.labels_dir}")
-                raise ValueError(f"Labels directory not found: {self.labels_dir}. Cannot use 'fusion' method.")
-                
-            # Get all atlas T1s and labels
-            T1s = natsorted(glob.glob(str(self.atlas_dir / '*.nii.gz')))
-            labels = natsorted(glob.glob(str(self.labels_dir / '*.nii.gz')))
-            
-            if not T1s:
-                self.logger.error(f"No atlas T1 images found in {self.atlas_dir}")
-                self.logger.error(f"Directory contents: {list(self.atlas_dir.iterdir())[:5]}")
-                raise ValueError(f"No atlas T1 images found in {self.atlas_dir}")
-            if not labels:
-                self.logger.error(f"No label images found in {self.labels_dir}")
-                self.logger.error(f"Directory contents: {list(self.labels_dir.iterdir())[:5]}")
-                raise ValueError(f"No label images found in {self.labels_dir}")
-                
-            self.logger.info(f"Found {len(T1s)} atlas T1 images and {len(labels)} label images")
-            try:
-                T1s, labels = _pair_atlases(T1s, labels)
-            except ValueError as e:
-                raise ValueError(f"{e} (brains in {self.atlas_dir}, label maps in {self.labels_dir})") from None
+            T1s, labels = fusion_atlases
                 
             # Registration is FireANTs; the fusion voting below stays on ANTs.
             # Images cross the boundary as NIfTI files under temp_dir and are

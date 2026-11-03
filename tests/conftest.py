@@ -87,7 +87,14 @@ _repo_data_dir = os.path.join(project_root, 'data')
 def _data_dir_state():
     state = {}
     # Follow symlinks: data/ is often a set of links to a shared atlas copy.
+    # Each real directory is walked once, so a link loop cannot hang the suite.
+    seen = set()
     for root, dirs, files in os.walk(_repo_data_dir, followlinks=True):
+        st_root = os.stat(root)
+        if (st_root.st_dev, st_root.st_ino) in seen:
+            dirs[:] = []
+            continue
+        seen.add((st_root.st_dev, st_root.st_ino))
         for name in dirs + files:
             path = os.path.join(root, name)
             try:

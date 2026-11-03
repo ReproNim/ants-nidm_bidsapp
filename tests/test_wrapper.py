@@ -697,8 +697,13 @@ class TestANTsSegmentation(unittest.TestCase):
                         "BrainExtractionMask": mock_image_read(),
                         "TemplateWarp": object(),
                     }
-                    with self.assertRaisesRegex(ValueError, "OASIS-TRT-20-7"):
+                    with self.assertRaisesRegex(ValueError, "OASIS-TRT-20-7") as raised:
                         self.segmenter.segment_image(mock_image_read(), method="fusion")
+                message = str(raised.exception)
+                self.assertIn(str(brains), message)
+                self.assertIn(str(labels), message)
+                # fails before preprocessing, not minutes into it
+                mock_ct.assert_not_called()
                 mock_warp.assert_not_called()
 
     def test_only_quick_registers_to_the_template(self):
