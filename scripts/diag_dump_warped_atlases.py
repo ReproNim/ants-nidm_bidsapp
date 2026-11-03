@@ -32,7 +32,6 @@ from pathlib import Path
 sys.path.insert(0, "/opt")
 
 import ants  # noqa: E402
-from natsort import natsorted  # noqa: E402
 
 from src.antspy.wrapper import ANTsSegmentation  # noqa: E402
 from src.registration.fireants import warp_atlases  # noqa: E402
@@ -63,8 +62,7 @@ def main():
     ants.image_write(mask, str(out / "brain_mask.nii.gz"))
     manifest["preprocess_s"] = round(time.time() - t0)
 
-    T1s = natsorted(str(p) for p in seg.atlas_dir.glob("*.nii.gz"))
-    labels = natsorted(str(p) for p in seg.labels_dir.glob("*.nii.gz"))
+    T1s, labels = seg._fusion_atlases()
     manifest["atlases"] = [Path(p).name for p in T1s]
     manifest["labels"] = [Path(p).name for p in labels]
 

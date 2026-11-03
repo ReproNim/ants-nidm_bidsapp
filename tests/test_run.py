@@ -13,8 +13,6 @@ import numpy as np
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
-# Check if running in CI environment
-IN_CI = os.environ.get('CI', 'false').lower() == 'true'
 
 # Mock the external dependencies
 mock_ants = MagicMock()
@@ -299,7 +297,6 @@ class TestRun(unittest.TestCase):
         
         self.assertFalse(result)
 
-    @unittest.skipIf(IN_CI, "Skip in CI environment as it requires modifying template directory")
     def test_process_participant(self):
         """Test participant level processing with NIDM conversion"""
         class Args:
@@ -323,26 +320,6 @@ class TestRun(unittest.TestCase):
         
         args = Args(self)
         
-        # Create template directory structure in the project root
-        project_root = Path(__file__).parent.parent
-        data_dir = project_root / 'data'
-        template_dir = data_dir / 'OASIS-30_Atropos_template'
-        os.makedirs(template_dir, exist_ok=True)
-        
-        # Create dummy template files
-        for fname in ['T_template0.nii.gz', 'T_template0_BrainCerebellum.nii.gz',
-                     'T_template0_BrainCerebellumProbabilityMask.nii.gz',
-                     'T_template0_BrainCerebellumExtractionMask.nii.gz']:
-            with open(template_dir / fname, 'w') as f:
-                f.write('dummy template')
-        
-        # Create Priors directory
-        priors_dir = template_dir / 'Priors2'
-        os.makedirs(priors_dir, exist_ok=True)
-        for i in range(1, 7):
-            with open(priors_dir / f'priors{i}.nii.gz', 'w') as f:
-                f.write('dummy prior')
-
         # Create a real numpy array for testing
         test_array = np.zeros((10, 10, 10))
         test_array[5:8, 5:8, 5:8] = 1  # Create some non-zero values
@@ -657,7 +634,6 @@ class TestRun(unittest.TestCase):
             mock_instance.run_subject.assert_called_once()
             mock_nidm.assert_not_called()
 
-    @unittest.skipIf(IN_CI, "Skip in CI environment as it requires modifying template directory")
     def test_process_session(self):
         """Test session level processing with NIDM conversion"""
         # Create session structure
@@ -687,26 +663,6 @@ class TestRun(unittest.TestCase):
         
         args = Args(self)
         
-        # Create template directory structure in the project root
-        project_root = Path(__file__).parent.parent
-        data_dir = project_root / 'data'
-        template_dir = data_dir / 'OASIS-30_Atropos_template'
-        os.makedirs(template_dir, exist_ok=True)
-        
-        # Create dummy template files
-        for fname in ['T_template0.nii.gz', 'T_template0_BrainCerebellum.nii.gz',
-                     'T_template0_BrainCerebellumProbabilityMask.nii.gz',
-                     'T_template0_BrainCerebellumExtractionMask.nii.gz']:
-            with open(template_dir / fname, 'w') as f:
-                f.write('dummy template')
-        
-        # Create Priors directory
-        priors_dir = template_dir / 'Priors2'
-        os.makedirs(priors_dir, exist_ok=True)
-        for i in range(1, 7):
-            with open(priors_dir / f'priors{i}.nii.gz', 'w') as f:
-                f.write('dummy prior')
-
         # Create a real numpy array for testing
         test_array = np.zeros((10, 10, 10))
         test_array[5:8, 5:8, 5:8] = 1  # Create some non-zero values
