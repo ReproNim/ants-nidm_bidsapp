@@ -284,14 +284,14 @@ class TestRun(unittest.TestCase):
         self.assertTrue(holder.get("choices"), "could not read --method choices")
         self.assertEqual(set(LABEL_PROTOCOL_BY_METHOD), holder["choices"])
 
-    def _run_conversion(self, returncode=0, stderr="", **kwargs):
+    def _run_conversion(self, returncode=0, stderr="", stdout="", **kwargs):
         """Run nidm_conversion with the converter mocked; return (result, argv, log)."""
         derivatives_dir = self.create_derivatives_structure()
         subject_dir = os.path.join(derivatives_dir, "sub-01", "ses-01")
         with patch('subprocess.run') as mock_run:
             mock_process = MagicMock()
             mock_process.returncode = returncode
-            mock_process.stdout = ""
+            mock_process.stdout = stdout
             mock_process.stderr = stderr
 
             def convert(*a, **kw):
@@ -344,6 +344,38 @@ class TestRun(unittest.TestCase):
                                               nidm_input_file=self._input_nidm())
         self.assertFalse(result)
         self.assertTrue(any(line.startswith("ERROR:") and message in line for line in log), log)
+
+    def test_converter_stderr_on_success_is_logged_as_warnings(self):
+        """A successful ants_seg_to_nidm run reports reduced provenance (stats
+        not linked to an acquisition, a new subject agent) only on stderr."""
+        stderr = ("/x/ants_seg_to_nidm.py:190: UserWarning: 0 anatomical AcquisitionObjects with "
+                  "file name sub-01_T1w.nii.gz found for subject sub-01; the stats are not linked\n"
+                  "  warnings.warn(\n"
+                  "\n"
+                  "The input NIDM has no subject agents; adding a new agent for sub-01 (--forcenidm)\n")
+        result, _, log = self._run_conversion(stderr=stderr, nidm_input_file=self._input_nidm())
+        self.assertTrue(result)
+        warnings = [line for line in log if line.startswith("WARNING:")]
+        self.assertEqual(warnings, [
+            "WARNING:test_logger:ants_seg_to_nidm: /x/ants_seg_to_nidm.py:190: UserWarning: 0 anatomical "
+            "AcquisitionObjects with file name sub-01_T1w.nii.gz found for subject sub-01; the stats are not linked",
+            "WARNING:test_logger:ants_seg_to_nidm: warnings.warn(",
+            "WARNING:test_logger:ants_seg_to_nidm: The input NIDM has no subject agents; adding a new "
+            "agent for sub-01 (--forcenidm)",
+        ])
+
+    def test_converter_success_without_stderr_logs_no_warning(self):
+        result, _, log = self._run_conversion(nidm_input_file=self._input_nidm())
+        self.assertTrue(result)
+        self.assertEqual([line for line in log if line.startswith("WARNING:")], [])
+
+    def test_converter_failure_logs_its_stdout(self):
+        result, _, log = self._run_conversion(returncode=1, stderr="error: boom",
+                                              stdout="Reading stats files\n",
+                                              nidm_input_file=self._input_nidm())
+        self.assertFalse(result)
+        self.assertTrue(any(line.startswith("ERROR:") and "Reading stats files" in line
+                            for line in log), log)
 
     def _parse_with_checked_out_converter(self, **kwargs):
         """Build the converter argv exactly as nidm_conversion does, then hand

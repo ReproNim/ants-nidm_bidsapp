@@ -551,7 +551,16 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
 
         if result.returncode != 0:
             logger.error(f"Error in NIDM conversion: {result.stderr}")
+            if result.stdout:
+                logger.error(f"ants_seg_to_nidm output: {result.stdout}")
             return False
+
+        # A run the converter completes with reduced provenance (stats not
+        # linked to an acquisition, a new subject agent under --forcenidm) is
+        # reported only on stderr, so log every line of it.
+        for line in (result.stderr or "").splitlines():
+            if line.strip():
+                logger.warning(f"ants_seg_to_nidm: {line.strip()}")
 
         if not nidm_output.exists():
             logger.error(f"NIDM conversion reported success but {nidm_output} was not written")
