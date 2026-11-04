@@ -531,6 +531,11 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
         # Add existing NIDM file if available
         if existing_nidm_file:
             cmd.extend(["--nidm", str(existing_nidm_file.absolute()), "--forcenidm"])
+            # Name the T1w that was segmented, so the converter links the stats
+            # to that acquisition; with several anatomical acquisitions and no
+            # name it links none.
+            if input_file is not None:
+                cmd.extend(["-acq_filename", Path(input_file).name])
 
         logger.info(f"Converting segmentation to NIDM for {log_prefix}")
         if existing_nidm_file:

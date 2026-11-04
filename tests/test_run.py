@@ -284,6 +284,67 @@ class TestRun(unittest.TestCase):
         self.assertTrue(holder.get("choices"), "could not read --method choices")
         self.assertEqual(set(LABEL_PROTOCOL_BY_METHOD), holder["choices"])
 
+    def _run_conversion(self, returncode=0, stderr="", **kwargs):
+        """Run nidm_conversion with the converter mocked; return (result, argv, log)."""
+        derivatives_dir = self.create_derivatives_structure()
+        subject_dir = os.path.join(derivatives_dir, "sub-01", "ses-01")
+        with patch('subprocess.run') as mock_run:
+            mock_process = MagicMock()
+            mock_process.returncode = returncode
+            mock_process.stdout = ""
+            mock_process.stderr = stderr
+
+            def convert(*a, **kw):
+                if returncode == 0:
+                    with open(os.path.join(subject_dir, "nidm.ttl"), "w") as f:
+                        f.write("@prefix nidm: <http://purl.org/nidash/nidm#> .\n")
+                return mock_process
+            mock_run.side_effect = convert
+
+            with self.assertLogs(self.logger, level="INFO") as log:
+                result = nidm_conversion(self.logger, derivatives_dir, "01",
+                                         bids_session="01", method="fusion", **kwargs)
+        mock_run.assert_called_once()
+        return result, mock_run.call_args[0][0], log.output
+
+    def _input_nidm(self):
+        path = os.path.join(self.temp_dir, "input_nidm.ttl")
+        with open(path, "w") as f:
+            f.write("@prefix nidm: <http://purl.org/nidash/nidm#> .\n")
+        return path
+
+    def test_converter_is_told_which_t1w_was_segmented(self):
+        """With an input NIDM the converter links the stats to the acquisition
+        whose file name is the T1w the app segmented; with several anatomical
+        acquisitions and no name it links none."""
+        t1w = Path(self.bids_dir) / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_run-2_T1w.nii.gz"
+        result, cmd, _ = self._run_conversion(nidm_input_file=self._input_nidm(),
+                                              input_file=t1w)
+        self.assertTrue(result)
+        self.assertIn("-acq_filename", cmd)
+        self.assertEqual(cmd[cmd.index("-acq_filename") + 1], "sub-01_ses-01_run-2_T1w.nii.gz")
+        self.assertIn("--nidm", cmd)
+
+    def test_no_acq_filename_without_an_input_nidm(self):
+        """The converter rejects -acq_filename without -n: there is no
+        acquisition to link."""
+        t1w = Path(self.bids_dir) / "sub-01" / "anat" / "sub-01_T1w.nii.gz"
+        result, cmd, _ = self._run_conversion(input_file=t1w)
+        self.assertTrue(result)
+        self.assertNotIn("-acq_filename", cmd)
+
+    def test_no_acq_filename_without_a_known_input(self):
+        result, cmd, _ = self._run_conversion(nidm_input_file=self._input_nidm())
+        self.assertTrue(result)
+        self.assertNotIn("-acq_filename", cmd)
+
+    def test_converter_failure_fails_the_conversion_with_its_stderr_logged(self):
+        message = "ERROR: Subject ID sub-01 was not found in the input NIDM, which has subject IDs: 02"
+        result, _, log = self._run_conversion(returncode=1, stderr=message,
+                                              nidm_input_file=self._input_nidm())
+        self.assertFalse(result)
+        self.assertTrue(any(line.startswith("ERROR:") and message in line for line in log), log)
+
     def test_nidm_conversion_missing_files(self):
         """Test NIDM conversion with missing required files"""
         derivatives_dir = self.output_dir
