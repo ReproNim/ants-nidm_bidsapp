@@ -189,3 +189,99 @@ def test_seg_preprocessor_leaves_ids_absent_from_the_map_at_zero(tmp_path):
     lm = build_label_map([a])
     out = _seg_preprocessor(lm)(torch.tensor([4.0, 999.0]))
     assert out.tolist() == [1.0, 0.0]
+
+
+# --------------------------------------------------------------------------
+# Centre-of-mass init inputs. MomentsRegistration sums over channels
+# (fireants 1.5.0 registration/moments.py, optimize_helper), so the masked-loss
+# batches -- intensity plus a trailing brain-mask channel -- would weight the
+# centre of mass by intensity + mask. Both registrations must give moments the
+# plain single-channel images. Image.concatenate (inside _with_mask_channel)
+# mutates the Image in place while BatchedImages snapshots its tensor when
+# built, so the plain batches must exist before the mask channel is added; the
+# fakes reproduce both. Runs without torch or fireants.
+# --------------------------------------------------------------------------
+
+def test_template_registration_gives_moments_the_plain_images(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from src.registration import fireants as mod
+
+    class FakeImage:
+        def __init__(self, path):
+            self.path = path
+            self.itk_image = object()
+            self.channels = 1
+
+        @classmethod
+        def load_file(cls, path, device=None):
+            return cls(path)
+
+    class FakeBatch:
+        def __init__(self, images):
+            self.images = list(images)
+            # fireants' BatchedImages snapshots the tensor at construction.
+            self.channels = [i.channels for i in self.images]
+
+    seen = {}
+
+    class FakeAffine:
+        def __init__(self, scales, iterations, fixed_batch, moving_batch, **kwargs):
+            seen["affine"] = (fixed_batch, moving_batch)
+            seen["init_rigid"] = kwargs.get("init_rigid")
+
+        def optimize(self):
+            pass
+
+    fake_io = types.ModuleType("fireants.io")
+    fake_io.Image, fake_io.BatchedImages = FakeImage, FakeBatch
+    fake_affine = types.ModuleType("fireants.registration.affine")
+    fake_affine.AffineRegistration = FakeAffine
+    monkeypatch.setitem(sys.modules, "fireants", types.ModuleType("fireants"))
+    monkeypatch.setitem(sys.modules, "fireants.io", fake_io)
+    monkeypatch.setitem(
+        sys.modules, "fireants.registration", types.ModuleType("fireants.registration")
+    )
+    monkeypatch.setitem(sys.modules, "fireants.registration.affine", fake_affine)
+
+    init = object()
+
+    def record_moments(fixed_batch, moving_batch):
+        seen["fixed"], seen["moving"] = fixed_batch, moving_batch
+        return init
+
+    def record_deformable(fixed_batch, moving_batch, affine):
+        seen["deformable"] = (fixed_batch, moving_batch)
+        return types.SimpleNamespace(optimize=lambda: None)
+
+    def add_mask_channel(img, *args):
+        # Like Image.concatenate: mutates and returns the same Image.
+        img.channels += 1
+        return img
+
+    monkeypatch.setattr(mod, "LOSS_MASKED", True)
+    monkeypatch.setattr(mod, "_moments_init", record_moments)
+    monkeypatch.setattr(mod, "_with_mask_channel", add_mask_channel)
+    monkeypatch.setattr(mod, "geometry_of", lambda img: None)
+    monkeypatch.setattr(mod, "write_nifti", lambda img, path: path)
+    monkeypatch.setattr(mod, "_assert_inbound", lambda *a: None)
+    monkeypatch.setattr(mod, "_deformable_registration", record_deformable)
+    monkeypatch.setattr(mod, "folding_fraction", lambda *a: [0.0])
+    monkeypatch.setattr(mod, "_refuse_folding", lambda *a: None)
+
+    mod.register_to_template(object(), object(), temp_dir=tmp_path, device="cpu")
+
+    assert seen["fixed"].channels == [1]
+    assert seen["moving"].channels == [1]
+    assert seen["fixed"].images[0].path.endswith("tpl_subject.nii.gz")
+    assert seen["moving"].images[0].path.endswith("tpl_template.nii.gz")
+    # The masked loss still sees image + mask on both sides, in both stages.
+    for stage in ("affine", "deformable"):
+        fixed_batch, moving_batch = seen[stage]
+        assert fixed_batch.channels == [2], stage
+        assert moving_batch.channels == [2], stage
+        assert fixed_batch.images[0].path.endswith("tpl_subject.nii.gz"), stage
+        assert moving_batch.images[0].path.endswith("tpl_template.nii.gz"), stage
+    # The init computed from the plain images is the one the affine starts from.
+    assert seen["init_rigid"] is init
