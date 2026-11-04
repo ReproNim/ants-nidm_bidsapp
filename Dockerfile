@@ -203,6 +203,6 @@ ENTRYPOINT ["/entrypoint.sh"]
 # does not invalidate the cached layers above.
 ARG GIT_COMMIT=unknown
 # The version label overrides the base image's own (e.g. Ubuntu's 22.04).
-LABEL org.opencontainers.image.version=0.2.2 \
+LABEL org.opencontainers.image.version=0.2.3 \
       org.opencontainers.image.revision=$GIT_COMMIT \
       org.opencontainers.image.source=https://github.com/ReproNim/ants-nidm_bidsapp

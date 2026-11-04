@@ -44,7 +44,7 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     # same key in %labels (it warns "already exists ... not overwriting"); a
     # label written here replaces it either way. SingularityCE sets only
     # SINGULARITY_LABELS, hence the fallback.
-    echo "org.opencontainers.image.version 0.2.2" >> "${APPTAINER_LABELS:-$SINGULARITY_LABELS}"
+    echo "org.opencontainers.image.version 0.2.3" >> "${APPTAINER_LABELS:-$SINGULARITY_LABELS}"
 
     export DEBIAN_FRONTEND=noninteractive
     # The CUDA base image ships nvcc but no Python; python3.10/python3-pip are
@@ -257,12 +257,12 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     python3 /opt/src/run.py "$@"
 
 %help
-    ANTs BIDS App 0.2.2
+    ANTs BIDS App 0.2.3
 
     This container performs ANTs-based segmentation and converts results to NIDM format.
 
     Version Information:
-    - ANTs BIDS App: 0.2.2
+    - ANTs BIDS App: 0.2.3
     - Python: 3.10
     - Base: nvidia/cuda:12.1.1-devel-ubuntu22.04
 
