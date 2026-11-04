@@ -90,9 +90,8 @@ Pre-built images will be available once the app is published to Docker Hub. For 
 ```bash
 git clone --recursive https://github.com/ReproNim/ants-nidm_bidsapp.git
 cd ants-nidm_bidsapp
-pip install -e src/ants_seg_to_nidm
 pip install -r requirements.txt
-pip install --upgrade 'rdflib>=7.0.0,<8'
+pip install --no-deps -e src/ants_seg_to_nidm
 pip install -e .
 ```
 
@@ -100,9 +99,9 @@ pip install -e .
 `src/ants_seg_to_nidm`; without it that directory is empty and the NIDM
 conversion step fails. In an existing clone, run
 `git submodule update --init --recursive`. The install order matches the
-container recipes: the converter first, then `requirements.txt`, whose pins
-take precedence, then rdflib 7 (pynidm 4.5.0 declares rdflib<6.4 but its
-oxigraph store needs rdflib 7).
+container recipes: `requirements.txt` first, which pins the NIDM stack
+(PyNIDM 5.0.0, rdflib 7), then the converter with `--no-deps`, because its own
+metadata still names PyNIDM 4.5.0. PyNIDM 5.0.0 needs Python 3.10 or newer.
 
 ### Building Containers from Source
 

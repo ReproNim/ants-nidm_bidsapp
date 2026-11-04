@@ -208,18 +208,22 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
 
     # Install Python dependencies and application code.
     # Order matters and mirrors the Dockerfile (and the sibling freesurfer-nidm
-    # app): the NIDM submodule goes in first with its loose deps, then the
-    # top-level requirements.txt applies the authoritative pins on top. The
-    # submodule's own requirements.txt is deliberately NOT installed -- it pins
-    # pynidm==4.2.4, which would silently override the 4.5.0 pin here.
-    cd /opt/src/ants_seg_to_nidm
-    python3 -m pip install -e .
-
+    # app): the top-level requirements.txt goes first and is the only place
+    # the NIDM stack is pinned (pynidm 5.0.0, oxrdflib, rdflib 7, prov). The
+    # converter submodule is then installed with --no-deps: its setup.py still
+    # declares pynidm==4.5.0, which would otherwise pull 4.5.0 (and rdflib 6.3)
+    # back in. Its own requirements.txt is deliberately NOT installed either.
     cd /opt
     python3 -m pip install -r requirements.txt
-    # oxrdflib (pulled in by pynidm 4.5.0) requires rdflib<8; pynidm wants >=7.
-    python3 -m pip install --no-cache-dir --upgrade 'rdflib>=7.0.0,<8'
+
+    cd /opt/src/ants_seg_to_nidm
+    python3 -m pip install --no-deps -e .
+
+    cd /opt
     python3 -m pip install -e .
+    # The converter picks its PyNIDM API by what is installed; fail the build
+    # if it would not run on the pinned 5.0.0.
+    python3 -c "import importlib.metadata as m; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); assert PYNIDM_MAJOR == 5 and v == '5.0.0', (PYNIDM_MAJOR, v); print('converter on PyNIDM', v)"
 
     # Mirror Docker's writable scratch directory
     mkdir -p /work

@@ -152,14 +152,15 @@ COPY README.md /app/
 
 # Install the application and NIDM conversion toolkit.
 # Order matters and mirrors Singularity (and the sibling freesurfer-nidm app):
-# the NIDM submodule first with its loose deps, then the top-level
-# requirements.txt applies the authoritative pins on top. The submodule's own
-# requirements.txt is deliberately NOT installed -- it pins pynidm==4.2.4, which
-# would silently override the 4.5.0 pin here.
-RUN pip3 install -e src/ants_seg_to_nidm && \
-    pip3 install -r requirements.txt && \
-    pip3 install --no-cache-dir --upgrade 'rdflib>=7.0.0,<8' && \
+# the top-level requirements.txt goes first and is the only place the NIDM
+# stack is pinned (pynidm 5.0.0, oxrdflib, rdflib 7, prov). The converter
+# submodule is then installed with --no-deps: its setup.py still declares
+# pynidm==4.5.0, which would otherwise pull 4.5.0 (and rdflib 6.3) back in.
+# Its own requirements.txt is deliberately NOT installed for the same reason.
+RUN pip3 install -r requirements.txt && \
+    pip3 install --no-deps -e src/ants_seg_to_nidm && \
     pip3 install -e . && \
+    python3 -c "import importlib.metadata as m; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); assert PYNIDM_MAJOR == 5 and v == '5.0.0', (PYNIDM_MAJOR, v); print('converter on PyNIDM', v)" && \
     chmod -R 755 /app
 
 # Set environment variables
