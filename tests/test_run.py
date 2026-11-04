@@ -345,6 +345,92 @@ class TestRun(unittest.TestCase):
         self.assertFalse(result)
         self.assertTrue(any(line.startswith("ERROR:") and message in line for line in log), log)
 
+    def _parse_with_checked_out_converter(self, **kwargs):
+        """Build the converter argv exactly as nidm_conversion does, then hand
+        it to the argument parser of the converter checked out at
+        src/ants_seg_to_nidm. Return the converter's parsed namespace.
+
+        Not mocked on the converter side: an option the pinned converter does
+        not accept makes its own parser exit 2, which fails the test."""
+        import importlib
+        import argparse as _argparse
+
+        checkout = Path(project_root) / "src" / "ants_seg_to_nidm"
+        script = checkout / "ants_seg_to_nidm" / "ants_seg_to_nidm.py"
+        if not script.is_file():
+            if os.environ.get("CI"):
+                self.fail(f"{script} missing: CI must check out the submodule")
+            self.skipTest("ants_seg_to_nidm submodule not checked out")
+
+        derivatives_dir = self.create_derivatives_structure()
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            nidm_conversion(self.logger, derivatives_dir, "01",
+                            bids_session="01", method="fusion", **kwargs)
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[:3], ["python", "-m", "ants_seg_to_nidm.ants_seg_to_nidm"])
+
+        saved_path = list(sys.path)
+        saved_modules = {name: mod for name, mod in sys.modules.items()
+                         if name == "ants_seg_to_nidm" or name.startswith("ants_seg_to_nidm.")}
+        for name in saved_modules:
+            del sys.modules[name]
+        sys.path.insert(0, str(checkout))
+        try:
+            converter = importlib.import_module(cmd[2])
+            self.assertTrue(
+                Path(converter.__file__).resolve().is_relative_to(checkout.resolve()),
+                f"imported {converter.__file__}, not the checked-out converter")
+
+            parsed = {}
+            real_parse_args = _argparse.ArgumentParser.parse_args
+
+            def parse_args(parser_self, args=None, namespace=None):
+                parsed["args"] = real_parse_args(parser_self, args, namespace)
+                return parsed["args"]
+
+            class ArgumentsAccepted(Exception):
+                pass
+
+            def stop(*a, **kw):
+                # main() calls url_validator on -f right after its own checks
+                # of the parsed arguments; stop there, before any conversion.
+                raise ArgumentsAccepted()
+
+            with patch.object(_argparse.ArgumentParser, "parse_args", parse_args), \
+                 patch.object(converter, "url_validator", stop), \
+                 patch.object(sys, "argv", ["ants_seg_to_nidm.py", *cmd[3:]]):
+                try:
+                    converter.main()
+                except ArgumentsAccepted:
+                    pass
+                except SystemExit as exc:
+                    self.fail(f"the checked-out converter rejected the app's argv "
+                              f"(exit {exc.code}): {cmd[3:]}")
+                else:
+                    self.fail("converter main() returned without reaching its input checks")
+            return parsed["args"]
+        finally:
+            sys.path[:] = saved_path
+            for name in [n for n in sys.modules
+                         if n == "ants_seg_to_nidm" or n.startswith("ants_seg_to_nidm.")]:
+                del sys.modules[name]
+            sys.modules.update(saved_modules)
+
+    def test_checked_out_converter_accepts_the_argv_with_an_input_nidm(self):
+        t1w = Path(self.bids_dir) / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.nii.gz"
+        args = self._parse_with_checked_out_converter(nidm_input_file=self._input_nidm(),
+                                                      input_file=t1w)
+        self.assertEqual(args.acq_filename, ["sub-01_ses-01_T1w.nii.gz"])
+        self.assertTrue(args.forcenidm)
+        self.assertEqual(args.label_protocol, "neuromorphometrics")
+
+    def test_checked_out_converter_accepts_the_argv_without_an_input_nidm(self):
+        args = self._parse_with_checked_out_converter()
+        self.assertIsNone(args.nidm_file)
+        self.assertEqual(args.subjid, "sub-01")
+
     def test_nidm_conversion_missing_files(self):
         """Test NIDM conversion with missing required files"""
         derivatives_dir = self.output_dir
