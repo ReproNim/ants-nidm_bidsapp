@@ -157,7 +157,7 @@ CONVERTER_MODULE = "ants_seg_to_nidm.ants_seg_to_nidm"
 CONVERTER_BOOTSTRAP = (
     "import sys; "
     f"from {CONVERTER_MODULE} import main; "
-    "sys.argv[0] = 'ants_seg_to_nidm'; "
+    'sys.argv[0] = "ants_seg_to_nidm"; '
     "sys.exit(main())"
 )
 
