@@ -148,6 +148,59 @@ def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None, logger=Non
     return None
 
 
+def converter_subject_id(bids_subject):
+    """The -subjid nidm_conversion passes to ants_seg_to_nidm for a subject label."""
+    return f"sub-{bids_subject}"
+
+
+def nidm_input_subject_problem(nidm_input_file, bids_subject, logger):
+    """Run ants_seg_to_nidm's own subject lookup on the input NIDM.
+
+    nidm_conversion later hands this file to the converter with -subjid
+    converter_subject_id(bids_subject) and --forcenidm, and the converter
+    refuses it when the subject cannot be identified (the file has subjects
+    but not this one, or several nodes with its id and not exactly one owning
+    an anatomical MRI acquisition). Called before segmenting, so that costs
+    seconds rather than a GPU segmentation. The file is only parsed with
+    rdflib; a file rdflib cannot parse raises, as it would in the converter.
+
+    Returns:
+        str or None: the converter's message when it would refuse the input,
+        None when it would find (or, under --forcenidm, add) the subject.
+    """
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    from rdflib import Graph, util
+    from ants_seg_to_nidm.ants_seg_to_nidm import SubjectLookupError, find_subject
+
+    path = str(nidm_input_file)
+    graph = Graph()
+    graph.parse(path, format=util.guess_format(path))
+    printed = StringIO()
+    try:
+        with redirect_stdout(printed):
+            # forceagent=True: nidm_conversion always passes --forcenidm with an input
+            find_subject(graph, converter_subject_id(bids_subject), forceagent=True)
+    except SubjectLookupError as err:
+        return str(err)
+    finally:
+        for line in printed.getvalue().splitlines():
+            if line.strip():
+                logger.info(f"NIDM input check: {line.strip()}")
+    return None
+
+
+def fail_on_nidm_input_without_subject(nidm_input_file, bids_subject, log_prefix, logger):
+    """Log why the input NIDM cannot take this subject's stats; True if it cannot."""
+    problem = nidm_input_subject_problem(nidm_input_file, bids_subject, logger)
+    if problem is None:
+        return False
+    logger.error(f"NIDM input {nidm_input_file} cannot take the stats of {log_prefix}: {problem}")
+    logger.error(f"Not segmenting {log_prefix}: fix the NIDM input, or pass --skip-nidm")
+    return True
+
+
 def get_version_info(app_version):
     """Version provenance for the delivered outputs.
 
@@ -513,7 +566,7 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
             "python", "-m",
             "ants_seg_to_nidm.ants_seg_to_nidm",
             "-f", f"{label_stats_str},{brain_vols_str},{seg_path_str}",
-            "-subjid", f"sub-{bids_subject}",
+            "-subjid", converter_subject_id(bids_subject),
             "-o", nidm_output_str
         ]
 
@@ -613,14 +666,18 @@ def process_participant(args, logger):
     
     logger.info(f"Processing single-session data for subject {participant_label}")
 
-    # Look the NIDM input up before segmenting: an unfetched annex file is an
-    # error, and it should cost seconds, not a GPU segmentation.
+    # Look the NIDM input up before segmenting: an unfetched annex file, or one
+    # the converter would refuse because it cannot find this subject in it, is
+    # an error, and it should cost seconds, not a GPU segmentation.
     nidm_input_file = None
     if not args.skip_nidm:
         nidm_input_file = find_nidm_input_file(
             nidm_input_dir, bids_subject, session_id=None, logger=logger)
         if nidm_input_file:
             logger.info(f"Found NIDM input file: {nidm_input_file}")
+            if fail_on_nidm_input_without_subject(
+                    nidm_input_file, bids_subject, participant_label, logger):
+                return 1
 
     success = True
     
@@ -719,14 +776,19 @@ def process_session(args, logger):
     
     logger.info(f"Processing session {session_label} for subject {participant_label}")
 
-    # Look the NIDM input up before segmenting: an unfetched annex file is an
-    # error, and it should cost seconds, not a GPU segmentation.
+    # Look the NIDM input up before segmenting: an unfetched annex file, or one
+    # the converter would refuse because it cannot find this subject in it, is
+    # an error, and it should cost seconds, not a GPU segmentation.
     nidm_input_file = None
     if not args.skip_nidm:
         nidm_input_file = find_nidm_input_file(
             nidm_input_dir, bids_subject, session_id=bids_session, logger=logger)
         if nidm_input_file:
             logger.info(f"Found NIDM input file: {nidm_input_file}")
+            if fail_on_nidm_input_without_subject(
+                    nidm_input_file, bids_subject,
+                    f"{participant_label} {session_label}", logger):
+                return 1
 
     success = True
     

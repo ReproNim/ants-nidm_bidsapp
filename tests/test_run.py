@@ -685,6 +685,71 @@ class TestRun(unittest.TestCase):
                     MockSegmenter.return_value.run_subject.assert_not_called()
                     mock_nidm.assert_not_called()
 
+    # An input NIDM whose only subject agent has id `subject_id` (or none).
+    @staticmethod
+    def _input_nidm_text(subject_id):
+        text = (
+            "@prefix prov: <http://www.w3.org/ns/prov#> .\n"
+            "@prefix ndar: <https://ndar.nih.gov/api/datadictionary/v2/dataelement/> .\n"
+            "@prefix nidm: <http://purl.org/nidash/nidm#> .\n"
+            "<http://iri.nidash.org/project> a nidm:Project, prov:Activity .\n"
+        )
+        if subject_id is not None:
+            text += (f"<http://iri.nidash.org/person> a prov:Agent, prov:Person ;"
+                     f' ndar:src_subject_id "{subject_id}" .\n')
+        return text
+
+    def _run_with_input_nidm(self, level, session, subject_id):
+        """Run a level for sub-01 with an input NIDM naming `subject_id`;
+        return (exit code, segmenter mock, nidm_conversion mock, error log)."""
+        shutil.rmtree(Path(self.temp_dir) / "NIDM", ignore_errors=True)
+        args = self._unfetched_nidm_args(session)
+        nidm_in = Path(args.nidm_input_dir)
+        shutil.rmtree(nidm_in)
+        target = nidm_in / "sub-01" / (f"ses-{session}" if session else "") / "nidm.ttl"
+        target.parent.mkdir(parents=True)
+        target.write_text(self._input_nidm_text(subject_id))
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion', return_value=True) as mock_nidm, \
+             patch('src.run.resolve_anat_choice') as mock_choice, \
+             patch('src.run.save_processing_summary'), \
+             patch('bids.BIDSLayout') as MockBIDSLayout, \
+             self.assertLogs(self.logger, level="INFO") as logs:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']
+            mock_layout.get_sessions.return_value = ['01']
+            MockBIDSLayout.return_value = mock_layout
+            MockSegmenter.return_value.run_subject.return_value = True
+            mock_choice.return_value.chosen = None
+            code = level(args, self.logger)
+        errors = [r.getMessage() for r in logs.records if r.levelno >= logging.ERROR]
+        return code, MockSegmenter.return_value, mock_nidm, errors
+
+    def test_input_nidm_without_the_subject_fails_before_segmentation(self):
+        """The converter would refuse an input NIDM that holds other subjects
+        but not this one; the app runs the converter's own lookup on it
+        before segmenting, so the job fails in seconds, with its message."""
+        for level, session in ((process_participant, None), (process_session, "01")):
+            with self.subTest(level=level.__name__):
+                code, segmenter, mock_nidm, errors = self._run_with_input_nidm(
+                    level, session, "02")
+                self.assertEqual(code, 1)
+                segmenter.run_subject.assert_not_called()
+                mock_nidm.assert_not_called()
+                self.assertTrue(any(
+                    "Subject ID sub-01 was not found in the input NIDM, which has "
+                    "subject IDs: 02" in e for e in errors), errors)
+
+    def test_input_nidm_with_the_subject_proceeds_to_segmentation(self):
+        for level, session in ((process_participant, None), (process_session, "01")):
+            for subject_id in ("1", "sub-01", None):  # None: no subjects, --forcenidm adds one
+                with self.subTest(level=level.__name__, subject_id=subject_id):
+                    code, segmenter, mock_nidm, errors = self._run_with_input_nidm(
+                        level, session, subject_id)
+                    self.assertEqual(code, 0, errors)
+                    segmenter.run_subject.assert_called_once()
+                    mock_nidm.assert_called_once()
+
     def test_process_participant_subject_not_found(self):
         """A participant label absent from the BIDS layout must fail fast,
         before touching the segmenter or the filesystem."""
