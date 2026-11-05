@@ -340,3 +340,91 @@ def test_build_checks_the_lookup_import_as_the_console_script_resolves_it():
              and "from ants_seg_to_nidm.ants_seg_to_nidm import SubjectLookupError, find_subject" in s]
     assert exists and check, "the console-script checks are missing from %post"
     assert min(exists[0], check[0]) > app_install[-1]
+
+
+def _pythonpath_after(assignment, host_value):
+    """PYTHONPATH after `assignment` runs in sh, starting from host_value
+    (None = unset). %environment is sourced by a POSIX shell."""
+    import subprocess
+    prelude = "unset PYTHONPATH" if host_value is None else f"export PYTHONPATH='{host_value}'"
+    out = subprocess.run(["sh", "-c", f'{prelude}; {assignment}; printf %s "$PYTHONPATH"'],
+                         capture_output=True, text=True, check=True)
+    return out.stdout
+
+
+@pytest.mark.parametrize("host_value", [None, "", "/host/lib"])
+def test_environment_pythonpath_never_adds_the_working_directory(host_value):
+    """An empty PYTHONPATH entry is the working directory to Python. With no
+    host PYTHONPATH (a BABS job, --cleanenv), `/opt:$PYTHONPATH` becomes
+    `/opt:`, and a converter checkout in the working directory then shadows
+    the installed converter."""
+    lines = [s for s in _singularity_section("environment") if "PYTHONPATH" in s]
+    assert lines == ["export PYTHONPATH=/opt${PYTHONPATH:+:$PYTHONPATH}"], lines
+    entries = _pythonpath_after(lines[0], host_value).split(":")
+    assert "" not in entries, entries
+    assert entries[0] == "/opt"
+    if host_value:
+        assert entries[1:] == [host_value]
+
+
+@pytest.mark.parametrize("assignment", [
+    "export PYTHONPATH=/opt:$PYTHONPATH", "export PYTHONPATH=$PYTHONPATH:/opt"])
+def test_pythonpath_check_rejects_a_trailing_empty_entry(assignment):
+    """Positive control for the test above: the old form does leave an empty
+    entry when the host has no PYTHONPATH."""
+    assert "" in _pythonpath_after(assignment, None).split(":")
+
+
+def test_dockerfile_does_not_extend_pythonpath():
+    """Docker has no host PYTHONPATH, so `ENV PYTHONPATH=/opt:$PYTHONPATH`
+    would also end in an empty entry. The image does not need one at all."""
+    env = [c for c in _commands(DOCKERFILE) if re.match(r"ENV\s+PYTHONPATH\b", c)]
+    assert all(re.fullmatch(r"ENV\s+PYTHONPATH=/opt", c) for c in env), env
+
+
+CONVERTER_FILE = "/opt/src/ants_seg_to_nidm/ants_seg_to_nidm/ants_seg_to_nidm.py"
+CONVERTER_PACKAGE_FILE = "/opt/src/ants_seg_to_nidm/ants_seg_to_nidm/__init__.py"
+
+
+def _shell_outside_quotes(line):
+    """The line with double-quoted strings removed: the shell part only."""
+    return re.sub(r'"(?:[^"\\]|\\.)*"', '""', line)
+
+
+def _lookup_check():
+    post = _post_statements()
+    check = [s for s in post
+             if "sys.path[0] = os.path.dirname(shutil.which('ants-nidm'))" in s]
+    assert len(check) == 1, check
+    return check[0]
+
+
+def test_lookup_check_asserts_the_image_s_own_converter_file():
+    """Importing the lookup proves only that some copy of the converter is
+    importable; the check must name the file the image installed, and that
+    the package is the real one, not a namespace package rooted at a checkout."""
+    check = _lookup_check()
+    assert f"m.__file__ != '{CONVERTER_FILE}'" in check, check
+    assert f"p.__file__ != '{CONVERTER_PACKAGE_FILE}'" in check, check
+    assert "sys.exit(" in check, check
+
+
+def test_lookup_check_runs_with_the_runtime_pythonpath():
+    """At run time sys.path is the console script's dir, then PYTHONPATH as
+    %environment sets it with no host value, which is /opt."""
+    assert _lookup_check().startswith('PYTHONPATH=/opt python3 -c "'), _lookup_check()
+
+
+@pytest.mark.parametrize("suffix", [
+    "", " || true", " || :", " || exit 0", "; true", " || echo skipped", " &", " | cat"])
+def test_lookup_check_can_fail_the_build(suffix):
+    """Nothing after the python command may swallow its exit status, and
+    %post runs under `set -e`. The suffixes are the mutants; only "" passes."""
+    check = _lookup_check() + suffix
+    shell = _shell_outside_quotes(check)
+    ok = not re.search(r"\|\||;|&|\|", shell) and " -O" not in shell
+    assert ok == (suffix == ""), (suffix, shell)
+    if suffix == "":
+        assert ok and _post_statements()[0] == "set -e"
+    # The real recipe line:
+    assert not re.search(r"\|\||;|&|\|", _shell_outside_quotes(_lookup_check()))

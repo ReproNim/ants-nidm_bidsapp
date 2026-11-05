@@ -230,10 +230,14 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     # every subject's conversion.
     python3 -c "import importlib.metadata as m; from ants_seg_to_nidm.ants_seg_to_nidm import main; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); assert PYNIDM_MAJOR == 5 and v == '5.0.0', (PYNIDM_MAJOR, v); print('converter imports on PyNIDM', v)"
     # The runscript starts the console script; check that it exists and that,
-    # with the console script's directory first on sys.path (as it is at run
-    # time), the NIDM input check's import resolves to the installed converter.
+    # with sys.path as it is at run time (the console script's directory, then
+    # PYTHONPATH as %environment sets it with no host value), the NIDM input
+    # check's import resolves to this image's installed converter file through
+    # the real package, not another copy or a namespace package rooted at a
+    # checkout. Exit non-zero otherwise (sys.exit, not assert: python3 -O
+    # would drop an assert).
     command -v ants-nidm
-    python3 -c "import os, shutil, sys; sys.path[0] = os.path.dirname(shutil.which('ants-nidm')); from ants_seg_to_nidm.ants_seg_to_nidm import SubjectLookupError, find_subject; print('ants-nidm resolves the converter lookup')"
+    PYTHONPATH=/opt python3 -c "import os, shutil, sys; sys.path[0] = os.path.dirname(shutil.which('ants-nidm')); from ants_seg_to_nidm.ants_seg_to_nidm import SubjectLookupError, find_subject; import ants_seg_to_nidm as p, ants_seg_to_nidm.ants_seg_to_nidm as m; (m.__file__ != '/opt/src/ants_seg_to_nidm/ants_seg_to_nidm/ants_seg_to_nidm.py' or p.__file__ != '/opt/src/ants_seg_to_nidm/ants_seg_to_nidm/__init__.py') and sys.exit('ants-nidm would import the converter from %s (package %s)' % (m.__file__, p.__file__)); print('ants-nidm resolves the converter lookup from', m.__file__)"
 
     # Mirror Docker's writable scratch directory
     mkdir -p /work
@@ -249,8 +253,10 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     fi
 
 %environment
-    # Add opt to Python path
-    export PYTHONPATH=/opt:$PYTHONPATH
+    # Add /opt to the Python path. No empty entry when the host sets no
+    # PYTHONPATH: Python reads an empty entry as the working directory, where a
+    # converter checkout would shadow the installed converter.
+    export PYTHONPATH=/opt${PYTHONPATH:+:$PYTHONPATH}
     # CUDA toolchain from the nvidia/cuda base image
     export CUDA_HOME=/usr/local/cuda
     # Add Python packages to path
