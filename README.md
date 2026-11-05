@@ -299,7 +299,9 @@ A subject whose id is not in the input NIDM it finds fails the job, before
 segmentation, with the converter's message: the file holds other subjects
 but not this one (ids are compared without `sub-` and leading zeros), or
 several nodes with its id and not exactly one of them owning an anatomical
-MRI acquisition. An input with no subjects at all is not an error; the
+MRI acquisition, or several matching nodes that store the id differently
+(`sub-01` and `001`), even when exactly one of them owns the acquisition. An
+input with no subjects at all is not an error; the
 subject is added to it.
 
 ### Command-line Arguments

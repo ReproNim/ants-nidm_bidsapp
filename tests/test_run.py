@@ -325,6 +325,61 @@ class TestRun(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-acq_filename") + 1], "sub-01_ses-01_run-2_T1w.nii.gz")
         self.assertIn("--nidm", cmd)
 
+    def _odd_paths(self):
+        """An input NIDM and a T1w whose paths hold spaces, quotes and '#'."""
+        odd_dir = Path(self.temp_dir) / "in put's \"dir\" #2"
+        odd_dir.mkdir()
+        nidm = odd_dir / "nidm input.ttl"
+        nidm.write_text("@prefix nidm: <http://purl.org/nidash/nidm#> .\n")
+        t1w = odd_dir / "sub-01_ses-01_T1w (copy).nii.gz"
+        return nidm, t1w
+
+    def _logged_command(self, log):
+        lines = [line.split("Running command: ", 1)[1] for line in log
+                 if "Running command: " in line]
+        self.assertEqual(len(lines), 1, log)
+        return lines[0]
+
+    def test_logged_command_splits_back_into_the_exact_argv(self):
+        """The log line is the argv shell-quoted: the -c bootstrap and paths
+        with spaces, quotes and '#' survive a shlex round trip."""
+        import shlex
+        nidm, t1w = self._odd_paths()
+        result, cmd, log = self._run_conversion(nidm_input_file=str(nidm), input_file=t1w)
+        self.assertTrue(result)
+        self.assertEqual(shlex.split(self._logged_command(log)), cmd)
+
+    def _replay_helper(self):
+        import importlib.util
+        path = Path(project_root) / "scripts" / "replay_nidm_from_log.py"
+        spec = importlib.util.spec_from_file_location("replay_nidm_from_log", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_replay_helper_recovers_the_converter_argv_from_the_log(self):
+        """scripts/replay_nidm_from_log.py reads the -c form the app logs:
+        the converter module and exactly the arguments after the bootstrap."""
+        replay = self._replay_helper()
+        nidm, t1w = self._odd_paths()
+        _, cmd, log = self._run_conversion(nidm_input_file=str(nidm), input_file=t1w)
+        log_file = Path(self.temp_dir) / "ants.log"
+        log_file.write_text("\n".join(log) + "\n")
+        entries = replay._parse_log(log_file)
+        self.assertEqual(len(entries), 1)
+        module, args = replay._split_command(entries[0]["command"])
+        self.assertEqual(module, CONVERTER_MODULE)
+        self.assertEqual(args, cmd[3:])
+
+    def test_replay_helper_refuses_c_code_that_is_not_the_converter(self):
+        replay = self._replay_helper()
+        with self.assertRaises(ValueError):
+            replay._split_command("python3 -c 'print(1)' -f a,b,c")
+        # Logs from before 0.2.3 used -m.
+        self.assertEqual(
+            replay._split_command("python -m ants_seg_to_nidm.ants_seg_to_nidm -f 'a b,c' -o x"),
+            ("ants_seg_to_nidm.ants_seg_to_nidm", ["-f", "a b,c", "-o", "x"]))
+
     def test_no_acq_filename_without_an_input_nidm(self):
         """The converter rejects -acq_filename without -n: there is no
         acquisition to link."""
@@ -727,16 +782,17 @@ class TestRun(unittest.TestCase):
                      f' ndar:src_subject_id "{subject_id}" .\n')
         return text
 
-    def _run_with_input_nidm(self, level, session, subject_id):
-        """Run a level for sub-01 with an input NIDM naming `subject_id`;
-        return (exit code, segmenter mock, nidm_conversion mock, error log)."""
+    def _run_with_input_nidm(self, level, session, subject_id, text=None):
+        """Run a level for sub-01 with an input NIDM naming `subject_id` (or
+        holding `text`); return (exit code, segmenter mock, nidm_conversion
+        mock, error log). Every log message is kept in self.last_messages."""
         shutil.rmtree(Path(self.temp_dir) / "NIDM", ignore_errors=True)
         args = self._unfetched_nidm_args(session)
         nidm_in = Path(args.nidm_input_dir)
         shutil.rmtree(nidm_in)
         target = nidm_in / "sub-01" / (f"ses-{session}" if session else "") / "nidm.ttl"
         target.parent.mkdir(parents=True)
-        target.write_text(self._input_nidm_text(subject_id))
+        target.write_text(text if text is not None else self._input_nidm_text(subject_id))
         with patch('src.run.ANTsSegmentation') as MockSegmenter, \
              patch('src.run.nidm_conversion', return_value=True) as mock_nidm, \
              patch('src.run.resolve_anat_choice') as mock_choice, \
@@ -750,8 +806,56 @@ class TestRun(unittest.TestCase):
             MockSegmenter.return_value.run_subject.return_value = True
             mock_choice.return_value.chosen = None
             code = level(args, self.logger)
+        self.last_messages = [r.getMessage() for r in logs.records]
         errors = [r.getMessage() for r in logs.records if r.levelno >= logging.ERROR]
         return code, MockSegmenter.return_value, mock_nidm, errors
+
+    @staticmethod
+    def _two_person_nidm_text(id_a, id_b):
+        """Two person nodes matching sub-01; only person-b owns an anatomical
+        MRI acquisition."""
+        return (
+            "@prefix prov: <http://www.w3.org/ns/prov#> .\n"
+            "@prefix ndar: <https://ndar.nih.gov/api/datadictionary/v2/dataelement/> .\n"
+            "@prefix nidm: <http://purl.org/nidash/nidm#> .\n"
+            "<http://iri.nidash.org/project> a nidm:Project, prov:Activity .\n"
+            f'<http://iri.nidash.org/person-a> a prov:Agent, prov:Person ; ndar:src_subject_id "{id_a}" .\n'
+            f'<http://iri.nidash.org/person-b> a prov:Agent, prov:Person ; ndar:src_subject_id "{id_b}" .\n'
+            "<http://iri.nidash.org/acq> a nidm:AcquisitionObject ;\n"
+            "    nidm:hadAcquisitionModality nidm:MagneticResonanceImaging ;\n"
+            "    nidm:hadImageUsageType nidm:Anatomical ;\n"
+            "    prov:wasGeneratedBy <http://iri.nidash.org/acq-activity> .\n"
+            "<http://iri.nidash.org/acq-activity> a prov:Activity ;\n"
+            "    prov:qualifiedAssociation [ a prov:Association ;"
+            " prov:agent <http://iri.nidash.org/person-b> ] .\n"
+        )
+
+    def test_input_check_logs_the_node_it_chose_among_duplicates(self):
+        """Two nodes store the subject's id and one owns the scan: the check
+        passes and the log names the node the stats will go to."""
+        for level, session in ((process_participant, None), (process_session, "01")):
+            with self.subTest(level=level.__name__):
+                code, segmenter, mock_nidm, errors = self._run_with_input_nidm(
+                    level, session, None, text=self._two_person_nidm_text("01", "01"))
+                self.assertEqual(code, 0, errors)
+                segmenter.run_subject.assert_called_once()
+                chosen = [m for m in self.last_messages if m.startswith("NIDM input check: ")]
+                self.assertEqual(len(chosen), 1, self.last_messages)
+                self.assertIn("Subject ID sub-01 matches 2 agents in the input NIDM", chosen[0])
+                self.assertIn("using http://iri.nidash.org/person-b, the only one that owns "
+                              "an anatomical MRI acquisition", chosen[0])
+
+    def test_input_nidm_with_differing_stored_ids_fails_before_segmentation(self):
+        """Two nodes match sub-01 only after normalisation ("01" and "sub-01");
+        they may be different people, so the job fails even though exactly one
+        owns the scan."""
+        code, segmenter, mock_nidm, errors = self._run_with_input_nidm(
+            process_participant, None, None, text=self._two_person_nidm_text("01", "sub-01"))
+        self.assertEqual(code, 1)
+        segmenter.run_subject.assert_not_called()
+        mock_nidm.assert_not_called()
+        self.assertTrue(any("their stored subject IDs differ (01, sub-01)" in e
+                            for e in errors), errors)
 
     def test_input_nidm_without_the_subject_fails_before_segmentation(self):
         """The converter would refuse an input NIDM that holds other subjects
