@@ -35,7 +35,7 @@ except ImportError:
 
 
 def _parse_log(log_path: Path) -> List[Dict[str, Optional[str]]]:
-    """Collect each ``python -m ants_seg_to_nidm`` command block from the log."""
+    """Collect each ants_seg_to_nidm command block from the log."""
     entries: List[Dict[str, Optional[str]]] = []
     current: Optional[Dict[str, Optional[str]]] = None
 
@@ -56,8 +56,19 @@ def _parse_log(log_path: Path) -> List[Dict[str, Optional[str]]]:
 
 
 def _split_command(command: str) -> Tuple[str, List[str]]:
-    """Split the recorded command into module path and arguments."""
+    """Split the recorded command into module path and arguments.
+
+    Logs from 0.2.3 on record `<python> -c '<bootstrap calling main()>' ...`;
+    earlier ones `python -m ants_seg_to_nidm.ants_seg_to_nidm ...`.
+    """
     tokens = shlex.split(command)
+    if "-c" in tokens and "-m" not in tokens:
+        idx = tokens.index("-c")
+        bootstrap = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+        marker = "from ants_seg_to_nidm.ants_seg_to_nidm import main"
+        if marker not in bootstrap:
+            raise ValueError("Command's -c code does not run ants_seg_to_nidm's main()")
+        return "ants_seg_to_nidm.ants_seg_to_nidm", tokens[idx + 2:]
     try:
         idx = tokens.index("-m")
     except ValueError as exc:

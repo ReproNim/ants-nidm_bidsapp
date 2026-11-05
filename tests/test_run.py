@@ -79,7 +79,7 @@ from src.antspy.inputs import AnatChoice
 from src.run import (process_participant, process_session, main, nidm_conversion,
                      create_dataset_description, subject_output_dir,
                      find_nidm_input_file, save_processing_summary,
-                     BIDS_VERSION, APP_VERSION)
+                     BIDS_VERSION, APP_VERSION, CONVERTER_BOOTSTRAP, CONVERTER_MODULE)
 
 class TestRun(unittest.TestCase):
     """Test cases for the run module"""
@@ -401,7 +401,7 @@ class TestRun(unittest.TestCase):
                             bids_session="01", method="fusion", **kwargs)
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
-        self.assertEqual(cmd[:3], ["python", "-m", "ants_seg_to_nidm.ants_seg_to_nidm"])
+        self.assertEqual(cmd[:3], [sys.executable, "-c", CONVERTER_BOOTSTRAP])
 
         saved_path = list(sys.path)
         saved_modules = {name: mod for name, mod in sys.modules.items()
@@ -410,7 +410,7 @@ class TestRun(unittest.TestCase):
             del sys.modules[name]
         sys.path.insert(0, str(checkout))
         try:
-            converter = importlib.import_module(cmd[2])
+            converter = importlib.import_module(CONVERTER_MODULE)
             self.assertTrue(
                 Path(converter.__file__).resolve().is_relative_to(checkout.resolve()),
                 f"imported {converter.__file__}, not the checked-out converter")
@@ -462,6 +462,34 @@ class TestRun(unittest.TestCase):
         args = self._parse_with_checked_out_converter()
         self.assertIsNone(args.nidm_file)
         self.assertEqual(args.subjid, "sub-01")
+
+    def test_successful_conversion_logs_no_runtime_warning(self):
+        """Unmocked: the checked-out converter converts the example stats it
+        ships. Run as `python -m ants_seg_to_nidm.ants_seg_to_nidm`, runpy
+        warned on every run that the module was already in sys.modules (the
+        package __init__ imports it), and the app relayed that as two WARNING
+        lines in every subject's log."""
+        examples = Path(project_root) / "src" / "ants_seg_to_nidm" / "examples"
+        if not (examples / "antslabelstats.csv").is_file():
+            if os.environ.get("CI"):
+                self.fail(f"{examples} missing: CI must check out the submodule")
+            self.skipTest("ants_seg_to_nidm submodule not checked out")
+        subject_dir = Path(self.output_dir) / "sub-01"
+        (subject_dir / "anat").mkdir(parents=True)
+        (subject_dir / "stats").mkdir()
+        shutil.copy(examples / "antslabelstats.csv", subject_dir / "stats" / "sub-01_antslabelstats.csv")
+        # BVOL and LABELVOL only: an id the CDE table lacks would be added to
+        # the converter's tracked mapping_data.
+        (subject_dir / "stats" / "sub-01_antsbrainvols.csv").write_text("BVOL,LABELVOL\n1666780,1200000\n")
+        shutil.copy(examples / "antsBrainSegmentation.nii.gz",
+                    subject_dir / "anat" / "sub-01_space-orig_dseg.nii.gz")
+
+        with self.assertLogs(self.logger, level="INFO") as logs:
+            ok = nidm_conversion(self.logger, self.output_dir, "01", method="quick")
+        warnings = [r.getMessage() for r in logs.records if r.levelno >= logging.WARNING]
+        self.assertTrue(ok, warnings)
+        self.assertTrue((subject_dir / "nidm.ttl").is_file())
+        self.assertEqual([w for w in warnings if "RuntimeWarning" in w or "sys.modules" in w], [])
 
     def test_nidm_conversion_missing_files(self):
         """Test NIDM conversion with missing required files"""

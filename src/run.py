@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 import shutil
 from datetime import datetime
+import shlex
 import subprocess
 from bids import BIDSLayout
 import ants
@@ -146,6 +147,19 @@ def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None, logger=Non
             " demographics or input provenance"
         )
     return None
+
+
+# The converter is run in the app's own interpreter by calling its main(),
+# not with `python -m ants_seg_to_nidm.ants_seg_to_nidm`: the package
+# __init__ imports that module, so -m executed it twice and runpy warned
+# (RuntimeWarning, "found in sys.modules ...") on every run.
+CONVERTER_MODULE = "ants_seg_to_nidm.ants_seg_to_nidm"
+CONVERTER_BOOTSTRAP = (
+    "import sys; "
+    f"from {CONVERTER_MODULE} import main; "
+    "sys.argv[0] = 'ants_seg_to_nidm'; "
+    "sys.exit(main())"
+)
 
 
 def converter_subject_id(bids_subject):
@@ -563,8 +577,7 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
         # subject inside the NIDM graph; ants_seg_to_nidm has no -session
         # option, so session identity is carried by the output directory.
         cmd = [
-            "python", "-m",
-            "ants_seg_to_nidm.ants_seg_to_nidm",
+            sys.executable, "-c", CONVERTER_BOOTSTRAP,
             "-f", f"{label_stats_str},{brain_vols_str},{seg_path_str}",
             "-subjid", converter_subject_id(bids_subject),
             "-o", nidm_output_str
@@ -594,7 +607,7 @@ def nidm_conversion(logger, derivatives_dir, bids_subject, nidm_input_file=None,
         if existing_nidm_file:
             logger.info(f"Adding data to existing NIDM file: {existing_nidm_file}")
         logger.info(f"NIDM will be written to: {nidm_output_str}")
-        logger.info(f"Running command: {' '.join(cmd)}")
+        logger.info(f"Running command: {shlex.join(cmd)}")
 
         result = subprocess.run(
             cmd,
