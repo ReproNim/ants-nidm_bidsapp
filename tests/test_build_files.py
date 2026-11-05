@@ -263,3 +263,33 @@ def test_build_fails_on_files_other_users_cannot_read(text, name):
     # explicit exit, in the Dockerfile on the RUN's exit status.
     tail = "\n".join(commands[checks[-1]:checks[-1] + 6])
     assert "exit 1" in tail, f"{name}: the readability check must exit non-zero"
+
+
+# The converter is installed with --no-deps (requirements.txt alone decides the
+# image's packages), so nothing at install time checks that its runtime
+# imports are present; a missing one would surface only when the first
+# subject's conversion runs, after segmentation. The build therefore imports
+# the module the app runs, not only its PyNIDM shim.
+CONVERTER_IMPORT_CHECK = (
+    r'python3 -c "[^"\n]*from ants_seg_to_nidm\.ants_seg_to_nidm import main[^"\n]*"'
+)
+
+
+@pytest.mark.parametrize("text, name", BUILD_FILES, ids=BUILD_IDS)
+def test_build_imports_the_converter_module_the_app_runs(text, name):
+    install = re.search(r"pip3? install --no-deps -e (?:src/ants_seg_to_nidm|\.)", text)
+    assert install, f"{name}: converter install not found"
+    check = re.search(CONVERTER_IMPORT_CHECK, text)
+    assert check, f"{name}: no build step imports ants_seg_to_nidm.ants_seg_to_nidm"
+    assert check.start() > install.start(), f"{name}: the import check runs before the install"
+
+
+def test_no_text_says_the_converter_declares_pynidm_4_5():
+    """The converter's setup.py declares pynidm>=4.5.0,<6 since d72e752; the
+    build files and docs once gave its pinning 4.5.0 as the reason for
+    --no-deps."""
+    for path in ("Dockerfile", "Singularity", "README.md", "requirements.txt"):
+        text = " ".join((ROOT / path).read_text().split())
+        for claim in (r"declares\s+pynidm==4\.5\.0", r"still\s+names?\s+(PyNIDM\s+)?4\.5\.0",
+                      r"metadata still names"):
+            assert not re.search(claim, text, re.IGNORECASE), (path, claim)

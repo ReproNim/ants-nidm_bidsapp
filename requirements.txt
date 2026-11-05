@@ -7,8 +7,10 @@ pytest>=7.0.0
 natsort>=8.0.0
 # NIDM stack. Kept in lockstep with the sibling freesurfer-nidm app: the shared
 # NIDM input datasets are produced with bids2nidm from PyNIDM 5.0.0, and this
-# file -- not src/ants_seg_to_nidm/requirements.txt or setup.py, which still
-# name 4.5.0 -- is the single source of truth for the container's NIDM pins.
+# file is the single source of truth for the container's NIDM pins. The
+# converter is installed with --no-deps; its setup.py accepts PyNIDM 4.5 and 5
+# (pynidm>=4.5.0,<6), so every package it imports must be listed here or come
+# with one listed here (pandas and requests come with pynidm 5.0.0).
 # The converter imports nidm.linkml under PyNIDM 5 (the 4.x nidm.core and
 # nidm.experiment modules are gone).
 pynidm==5.0.0

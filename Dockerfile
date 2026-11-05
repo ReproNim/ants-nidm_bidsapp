@@ -154,13 +154,18 @@ COPY README.md /app/
 # Order matters and mirrors Singularity (and the sibling freesurfer-nidm app):
 # the top-level requirements.txt goes first and is the only place the NIDM
 # stack is pinned (pynidm 5.0.0, oxrdflib, rdflib 7, prov). The converter
-# submodule is then installed with --no-deps: its setup.py still declares
-# pynidm==4.5.0, which would otherwise pull 4.5.0 (and rdflib 6.3) back in.
-# Its own requirements.txt is deliberately NOT installed for the same reason.
+# submodule is then installed with --no-deps, so the image holds exactly what
+# requirements.txt resolves to: the converter's own setup.py declares looser
+# ranges (pynidm>=4.5.0,<6, and prov[graph], whose graph extra only PyNIDM 4.x
+# needs), and its requirements.txt is its test environment, not installed here.
+# Because nothing then checks the converter's dependencies at install time,
+# the last step imports the converter module the app runs (not only its
+# PyNIDM shim), so a runtime dependency missing from requirements.txt fails
+# the build rather than every subject's conversion.
 RUN pip3 install -r requirements.txt && \
     pip3 install --no-deps -e src/ants_seg_to_nidm && \
     pip3 install -e . && \
-    python3 -c "import importlib.metadata as m; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); assert PYNIDM_MAJOR == 5 and v == '5.0.0', (PYNIDM_MAJOR, v); print('converter on PyNIDM', v)" && \
+    python3 -c "import importlib.metadata as m; from ants_seg_to_nidm.ants_seg_to_nidm import main; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); assert PYNIDM_MAJOR == 5 and v == '5.0.0', (PYNIDM_MAJOR, v); print('converter imports on PyNIDM', v)" && \
     chmod -R 755 /app
 
 # Set environment variables

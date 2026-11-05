@@ -100,8 +100,9 @@ pip install -e .
 conversion step fails. In an existing clone, run
 `git submodule update --init --recursive`. The install order matches the
 container recipes: `requirements.txt` first, which pins the NIDM stack
-(PyNIDM 5.0.0, rdflib 7), then the converter with `--no-deps`, because its own
-metadata still names PyNIDM 4.5.0. PyNIDM 5.0.0 needs Python 3.10 or newer.
+(PyNIDM 5.0.0, rdflib 7), then the converter with `--no-deps`, so that
+`requirements.txt` alone decides the installed versions (the converter itself
+accepts PyNIDM 4.5 and 5). PyNIDM 5.0.0 needs Python 3.10 or newer.
 
 ### Building Containers from Source
 
