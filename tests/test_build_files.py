@@ -293,3 +293,50 @@ def test_no_text_says_the_converter_declares_pynidm_4_5():
         for claim in (r"declares\s+pynidm==4\.5\.0", r"still\s+names?\s+(PyNIDM\s+)?4\.5\.0",
                       r"metadata still names"):
             assert not re.search(claim, text, re.IGNORECASE), (path, claim)
+
+
+def _singularity_section(name):
+    """Non-blank, non-comment lines of a Singularity section, stripped."""
+    head = re.search(rf"^%{name}\s*$", SINGULARITY, re.MULTILINE)
+    assert head, f"Singularity has no %{name} section"
+    rest = SINGULARITY[head.end():]
+    nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
+    return _commands(rest[: nxt.start()] if nxt else rest)
+
+
+CONSOLE_SCRIPT = 'exec ants-nidm "$@"'
+
+
+def test_runscript_starts_the_console_script():
+    """`apptainer run` (how BABS starts the app) must go through the console
+    script. `python3 /opt/src/run.py` puts /opt/src first on sys.path, where
+    the converter checkout shadows the installed package and the NIDM input
+    check fails to import for every subject that has an input."""
+    runscript = _singularity_section("runscript")
+    assert runscript == [CONSOLE_SCRIPT], runscript
+    assert not any(re.search(r"\brun\.py\b", line) for line in runscript)
+
+
+def test_docker_entrypoint_starts_the_same_console_script():
+    assert re.search(r"""echo '#!/bin/bash\\nexec ants-nidm "\$@"' > /entrypoint\.sh""",
+                     DOCKERFILE)
+    assert 'ENTRYPOINT ["/entrypoint.sh"]' in DOCKERFILE
+
+
+def test_console_script_is_declared():
+    setup = (ROOT / "setup.py").read_text()
+    assert re.search(r"""["']ants-nidm\s*=\s*src\.run:main["']""", setup)
+
+
+def test_build_checks_the_lookup_import_as_the_console_script_resolves_it():
+    """The build must fail if the console script is missing or if, with its
+    directory first on sys.path, the converter lookup does not import."""
+    post = _post_statements()
+    app_install = [i for i, s in enumerate(post) if s == "python3 -m pip install -e ."]
+    assert app_install, "app install not found in %post"
+    exists = [i for i, s in enumerate(post) if s == "command -v ants-nidm"]
+    check = [i for i, s in enumerate(post)
+             if "sys.path[0] = os.path.dirname(shutil.which('ants-nidm'))" in s
+             and "from ants_seg_to_nidm.ants_seg_to_nidm import SubjectLookupError, find_subject" in s]
+    assert exists and check, "the console-script checks are missing from %post"
+    assert min(exists[0], check[0]) > app_install[-1]

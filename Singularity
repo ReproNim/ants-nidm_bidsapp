@@ -229,6 +229,11 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     # its dependencies, and a missing one should fail the build rather than
     # every subject's conversion.
     python3 -c "import importlib.metadata as m; from ants_seg_to_nidm.ants_seg_to_nidm import main; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); assert PYNIDM_MAJOR == 5 and v == '5.0.0', (PYNIDM_MAJOR, v); print('converter imports on PyNIDM', v)"
+    # The runscript starts the console script; check that it exists and that,
+    # with the console script's directory first on sys.path (as it is at run
+    # time), the NIDM input check's import resolves to the installed converter.
+    command -v ants-nidm
+    python3 -c "import os, shutil, sys; sys.path[0] = os.path.dirname(shutil.which('ants-nidm')); from ants_seg_to_nidm.ants_seg_to_nidm import SubjectLookupError, find_subject; print('ants-nidm resolves the converter lookup')"
 
     # Mirror Docker's writable scratch directory
     mkdir -p /work
@@ -258,8 +263,13 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     export TMP=/work
 
 %runscript
-    # Execute the Python entry point directly
-    python3 /opt/src/run.py "$@"
+    # Start the app through its console script, as the Dockerfile's entrypoint
+    # does. Not `python3 /opt/src/run.py`: that puts /opt/src first on
+    # sys.path, where the converter's checkout (/opt/src/ants_seg_to_nidm, no
+    # __init__.py) shadows the installed package, so
+    # `ants_seg_to_nidm.ants_seg_to_nidm` resolves to the checkout's inner
+    # package directory and the NIDM input check fails to import.
+    exec ants-nidm "$@"
 
 %help
     ANTs BIDS App 0.2.3
