@@ -415,16 +415,109 @@ def test_lookup_check_runs_with_the_runtime_pythonpath():
     assert _lookup_check().startswith('PYTHONPATH=/opt python3 -c "'), _lookup_check()
 
 
-@pytest.mark.parametrize("suffix", [
-    "", " || true", " || :", " || exit 0", "; true", " || echo skipped", " &", " | cat"])
-def test_lookup_check_can_fail_the_build(suffix):
-    """Nothing after the python command may swallow its exit status, and
-    %post runs under `set -e`. The suffixes are the mutants; only "" passes."""
-    check = _lookup_check() + suffix
-    shell = _shell_outside_quotes(check)
-    ok = not re.search(r"\|\||;|&|\|", shell) and " -O" not in shell
-    assert ok == (suffix == ""), (suffix, shell)
-    if suffix == "":
-        assert ok and _post_statements()[0] == "set -e"
-    # The real recipe line:
-    assert not re.search(r"\|\||;|&|\|", _shell_outside_quotes(_lookup_check()))
+# Every python check a build relies on. Each must be able to fail the build.
+BUILD_CHECKS = [
+    ("Dockerfile", "fused_ops", FUSED_OPS_ASSERTION_CMD),
+    ("Dockerfile", "converter import", CONVERTER_IMPORT_CHECK),
+    ("Singularity", "fused_ops", FUSED_OPS_ASSERTION_CMD),
+    ("Singularity", "converter import", CONVERTER_IMPORT_CHECK),
+    ("Singularity", "lookup", re.escape("sys.path[0] = os.path.dirname(shutil.which('ants-nidm'))")),
+]
+PYTHON_C = r'python3 -c "(?:[^"\\]|\\.)*"'
+
+
+def _docker_instructions(text):
+    """Dockerfile instructions, `\\`-continuations joined, comment and blank
+    lines dropped."""
+    instructions, current = [], []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        current.append(s[:-1].rstrip() if s.endswith("\\") else s)
+        if not s.endswith("\\"):
+            instructions.append(" ".join(current))
+            current = []
+    if current:
+        instructions.append(" ".join(current))
+    return instructions
+
+
+def _check_unit(name, pattern):
+    """The unit whose exit status decides whether the check fails the build:
+    the whole RUN instruction in the Dockerfile, the %post statement in
+    Singularity (which runs under `set -e`)."""
+    units = _docker_instructions(DOCKERFILE) if name == "Dockerfile" else _post_statements()
+    found = [u for u in units if re.search(pattern, u)]
+    assert len(found) == 1, (name, pattern, found)
+    return found[0]
+
+
+def _post_keeps_errexit(statements):
+    """`set -e` first, and nothing later turns it off."""
+    return statements[:1] == ["set -e"] and not any(
+        re.search(r"\bset\s+(\+[A-Za-z]*e|\+o\s+errexit\b)", s) for s in statements)
+
+
+def _can_fail_the_build(unit, name, post=None):
+    """No `||`, `;`, `|` or `&` (in the Dockerfile, `&&` joins are fine)
+    outside the quoted code, no `python3 -O` (it drops asserts), and in
+    Singularity %post keeps `set -e`."""
+    shell = _shell_outside_quotes(unit)
+    if re.search(r"python3\s+-O", shell):
+        return False
+    if name == "Dockerfile":
+        return not re.search(r";|\||(?<!&)&(?!&)", shell)
+    return (not re.search(r";|\||&", shell)
+            and _post_keeps_errexit(_post_statements() if post is None else post))
+
+
+SWALLOWING_SUFFIXES = [" || true", " || :", " || exit 0", "; true", " || echo skipped", " &", " | cat"]
+
+
+@pytest.mark.parametrize("name, check, pattern", BUILD_CHECKS,
+                         ids=[f"{n}-{c}" for n, c, _ in BUILD_CHECKS])
+@pytest.mark.parametrize("suffix", [""] + SWALLOWING_SUFFIXES)
+def test_build_checks_can_fail_the_build(name, check, pattern, suffix):
+    """Nothing after a python check may swallow its exit status. The suffixes
+    are mutants placed right after the check's quoted code; only "" passes."""
+    unit = _check_unit(name, pattern)
+    code = list(re.finditer(PYTHON_C, unit))
+    assert len(code) == 1, (name, check, unit)
+    mutant = unit[:code[0].end()] + suffix + unit[code[0].end():]
+    assert _can_fail_the_build(mutant, name) == (suffix == ""), (name, check, suffix, mutant)
+
+
+@pytest.mark.parametrize("name, check, pattern", BUILD_CHECKS,
+                         ids=[f"{n}-{c}" for n, c, _ in BUILD_CHECKS])
+def test_build_checks_reject_python_optimize(name, check, pattern):
+    unit = _check_unit(name, pattern)
+    assert _can_fail_the_build(unit, name)
+    assert not _can_fail_the_build(unit.replace("python3 -c", "python3 -O -c", 1), name)
+
+
+@pytest.mark.parametrize("off", ["set +e", "set +o errexit", "set +eu"])
+def test_post_errexit_cannot_be_turned_off_later(off):
+    """A later `set +e` would make every %post check after it a no-op."""
+    post = _post_statements()
+    assert _post_keeps_errexit(post)
+    assert not _post_keeps_errexit(post[:2] + [off] + post[2:])
+    unit = _check_unit("Singularity", CONVERTER_IMPORT_CHECK)
+    assert not _can_fail_the_build(unit, "Singularity", post=post[:2] + [off] + post[2:])
+
+
+PYNIDM_PIN = re.search(r"^pynidm==([\d.]+)\s*$", REQUIREMENTS, re.MULTILINE).group(1)
+
+
+@pytest.mark.parametrize("text, name", BUILD_FILES, ids=BUILD_IDS)
+def test_converter_import_check_asserts_the_pinned_pynidm(text, name):
+    """The build fails unless the installed PyNIDM is requirements.txt's pin
+    and the converter took its API for that major version."""
+    check = re.search(CONVERTER_IMPORT_CHECK, text).group(0)
+    major = PYNIDM_PIN.split(".")[0]
+    assert f"assert PYNIDM_MAJOR == {major} and v == '{PYNIDM_PIN}'" in check, check
+
+
+def test_ci_installs_the_pinned_pynidm():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert set(re.findall(r"pynidm==([\d.]+)", ci)) == {PYNIDM_PIN}
