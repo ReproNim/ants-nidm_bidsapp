@@ -165,7 +165,7 @@ COPY README.md /app/
 RUN pip3 install -r requirements.txt && \
     pip3 install --no-deps -e src/ants_seg_to_nidm && \
     pip3 install -e . && \
-    python3 -c "import importlib.metadata as m; from ants_seg_to_nidm.ants_seg_to_nidm import main; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); assert PYNIDM_MAJOR == 5 and v == '5.0.0', (PYNIDM_MAJOR, v); print('converter imports on PyNIDM', v)" && \
+    python3 -c "import importlib.metadata as m, sys; from ants_seg_to_nidm.ants_seg_to_nidm import main; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); (PYNIDM_MAJOR != 5 or v != '5.0.0') and sys.exit('converter runs on PyNIDM %s (API %s), not the pinned 5.0.0' % (v, PYNIDM_MAJOR)); print('converter imports on PyNIDM', v)" && \
     chmod -R 755 /app
 
 # Set environment variables

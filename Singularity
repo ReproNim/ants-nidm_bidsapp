@@ -228,7 +228,7 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     # app runs, not only its PyNIDM shim: with --no-deps nothing else checks
     # its dependencies, and a missing one should fail the build rather than
     # every subject's conversion.
-    python3 -c "import importlib.metadata as m; from ants_seg_to_nidm.ants_seg_to_nidm import main; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); assert PYNIDM_MAJOR == 5 and v == '5.0.0', (PYNIDM_MAJOR, v); print('converter imports on PyNIDM', v)"
+    python3 -c "import importlib.metadata as m, sys; from ants_seg_to_nidm.ants_seg_to_nidm import main; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); (PYNIDM_MAJOR != 5 or v != '5.0.0') and sys.exit('converter runs on PyNIDM %s (API %s), not the pinned 5.0.0' % (v, PYNIDM_MAJOR)); print('converter imports on PyNIDM', v)"
     # The runscript starts the console script; check that it exists and that,
     # with sys.path as it is at run time (the console script's directory, then
     # PYTHONPATH as %environment sets it with no host value), the NIDM input

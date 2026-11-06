@@ -37,7 +37,8 @@ FUSED_OPS_ASSERTION_CMD = r'python3 -c "import torch, fireants_fused_ops'
 
 
 def _post_statements():
-    """Non-blank, non-comment lines of Singularity's %post, stripped."""
+    """Non-blank, non-comment lines of Singularity's %post, stripped, with
+    `\\`-continuation lines joined into the line they continue."""
     # Anchor on the section header at the start of a line: "%post" also occurs
     # in prose inside the header comment.
     post = re.search(r"^%post\s*$", SINGULARITY, re.MULTILINE)
@@ -45,11 +46,24 @@ def _post_statements():
     rest = SINGULARITY[post.end():]
     nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
     body = rest[: nxt.start()] if nxt else rest
-    return [
-        line.strip()
-        for line in body.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    return _join_continuations(body)
+
+
+def _join_continuations(text):
+    """Non-blank, non-comment lines, stripped, a line ending in `\\` joined
+    with the lines it continues: one entry per shell command line."""
+    joined, current = [], []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        current.append(s[:-1].rstrip() if s.endswith("\\") else s)
+        if not s.endswith("\\"):
+            joined.append(" ".join(current))
+            current = []
+    if current:
+        joined.append(" ".join(current))
+    return joined
 
 
 def _commands(text):
@@ -426,66 +440,85 @@ BUILD_CHECKS = [
 PYTHON_C = r'python3 -c "(?:[^"\\]|\\.)*"'
 
 
-def _docker_instructions(text):
-    """Dockerfile instructions, `\\`-continuations joined, comment and blank
-    lines dropped."""
-    instructions, current = [], []
-    for line in text.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        current.append(s[:-1].rstrip() if s.endswith("\\") else s)
-        if not s.endswith("\\"):
-            instructions.append(" ".join(current))
-            current = []
-    if current:
-        instructions.append(" ".join(current))
-    return instructions
-
-
 def _check_unit(name, pattern):
     """The unit whose exit status decides whether the check fails the build:
-    the whole RUN instruction in the Dockerfile, the %post statement in
-    Singularity (which runs under `set -e`)."""
-    units = _docker_instructions(DOCKERFILE) if name == "Dockerfile" else _post_statements()
+    the whole RUN instruction in the Dockerfile, the %post command line in
+    Singularity (which runs under `set -e`), continuation lines joined."""
+    units = _join_continuations(DOCKERFILE) if name == "Dockerfile" else _post_statements()
     found = [u for u in units if re.search(pattern, u)]
     assert len(found) == 1, (name, pattern, found)
     return found[0]
 
 
 def _post_keeps_errexit(statements):
-    """`set -e` first, and nothing later turns it off."""
+    """`set -e` first, and no later `set` turns it off (`set +e`, `set -x +e`,
+    `set +o errexit`)."""
     return statements[:1] == ["set -e"] and not any(
-        re.search(r"\bset\s+(\+[A-Za-z]*e|\+o\s+errexit\b)", s) for s in statements)
+        re.search(r"\bset\b[^;&|]*?\s(\+[A-Za-z]*e|\+o\s+errexit\b)", s) for s in statements)
 
 
 def _can_fail_the_build(unit, name, post=None):
-    """No `||`, `;`, `|` or `&` (in the Dockerfile, `&&` joins are fine)
-    outside the quoted code, no `python3 -O` (it drops asserts), and in
-    Singularity %post keeps `set -e`."""
+    """Whether a failing check fails the build.
+
+    Singularity: the %post command line is the check alone, optionally with
+    PYTHONPATH=/opt in front, and %post keeps `set -e`. Anything else on the
+    line (`|| true`, `!`, `if ...`, a continuation) can swallow its status.
+    Dockerfile: a plain RUN instruction (no heredoc, which runs without
+    `set -e`) whose commands are joined by `&&` only, with no `!`, and the
+    check right after `RUN` or an `&&`.
+    Either way, no `python3 -O`."""
     shell = _shell_outside_quotes(unit)
     if re.search(r"python3\s+-O", shell):
         return False
     if name == "Dockerfile":
-        return not re.search(r";|\||(?<!&)&(?!&)", shell)
-    return (not re.search(r";|\||&", shell)
+        return (shell.startswith("RUN ") and "<<" not in shell
+                and re.search(r'(^RUN |&& )python3 -c ""', shell) is not None
+                and not re.search(r";|\||(?<!&)&(?!&)|(^|\s)!(\s|$)", shell))
+    return (re.fullmatch(r'(PYTHONPATH=/opt )?python3 -c ""', shell) is not None
             and _post_keeps_errexit(_post_statements() if post is None else post))
 
 
-SWALLOWING_SUFFIXES = [" || true", " || :", " || exit 0", "; true", " || echo skipped", " &", " | cat"]
+SWALLOWING_SUFFIXES = [" || true", " || :", " || exit 0", "; true", " || echo skipped", " &", " | cat",
+                       " \\\n    || true"]
+SWALLOWING_PREFIXES = ["! ", "if ", "true || "]
 
 
 @pytest.mark.parametrize("name, check, pattern", BUILD_CHECKS,
                          ids=[f"{n}-{c}" for n, c, _ in BUILD_CHECKS])
-@pytest.mark.parametrize("suffix", [""] + SWALLOWING_SUFFIXES)
-def test_build_checks_can_fail_the_build(name, check, pattern, suffix):
-    """Nothing after a python check may swallow its exit status. The suffixes
-    are mutants placed right after the check's quoted code; only "" passes."""
+@pytest.mark.parametrize("prefix, suffix", [("", "")] + [("", s) for s in SWALLOWING_SUFFIXES]
+                         + [(p, "") for p in SWALLOWING_PREFIXES])
+def test_build_checks_can_fail_the_build(name, check, pattern, prefix, suffix):
+    """Nothing around a python check may swallow its exit status. The
+    prefixes and suffixes are mutants of the recipe text, re-parsed the way
+    the tests parse the recipe (a suffix with a backslash-newline puts
+    `|| true` on a continuation line); only the unchanged text passes."""
+    text = DOCKERFILE if name == "Dockerfile" else SINGULARITY
     unit = _check_unit(name, pattern)
     code = list(re.finditer(PYTHON_C, unit))
     assert len(code) == 1, (name, check, unit)
-    mutant = unit[:code[0].end()] + suffix + unit[code[0].end():]
-    assert _can_fail_the_build(mutant, name) == (suffix == ""), (name, check, suffix, mutant)
+    assert text.count(code[0].group(0)) == 1, (name, check)
+    s = text.index(code[0].group(0))
+    e = s + len(code[0].group(0))
+    mutated = text[:s] + prefix + text[s:e] + suffix + text[e:]
+    if name == "Dockerfile":
+        units = _join_continuations(mutated)
+    else:
+        post = re.search(r"^%post\s*$", mutated, re.MULTILINE)
+        rest = mutated[post.end():]
+        nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
+        units = _join_continuations(rest[: nxt.start()] if nxt else rest)
+    found = [u for u in units if code[0].group(0) in u]
+    assert len(found) == 1, (name, check, prefix, suffix, found)
+    ok = _can_fail_the_build(found[0], name, post=None if name == "Dockerfile" else units)
+    assert ok == (prefix == suffix == ""), (name, check, prefix, suffix, found[0])
+
+
+@pytest.mark.parametrize("name, check, pattern", BUILD_CHECKS,
+                         ids=[f"{n}-{c}" for n, c, _ in BUILD_CHECKS])
+def test_build_checks_do_not_rely_on_assert(name, check, pattern):
+    """python3 -O and PYTHONOPTIMIZE drop asserts; a check exits explicitly."""
+    code = re.search(PYTHON_C, _check_unit(name, pattern)).group(0)
+    assert not re.search(r"\bassert\b", code), code
 
 
 @pytest.mark.parametrize("name, check, pattern", BUILD_CHECKS,
@@ -496,7 +529,7 @@ def test_build_checks_reject_python_optimize(name, check, pattern):
     assert not _can_fail_the_build(unit.replace("python3 -c", "python3 -O -c", 1), name)
 
 
-@pytest.mark.parametrize("off", ["set +e", "set +o errexit", "set +eu"])
+@pytest.mark.parametrize("off", ["set +e", "set +o errexit", "set +eu", "set -x +e", "set -o pipefail +o errexit"])
 def test_post_errexit_cannot_be_turned_off_later(off):
     """A later `set +e` would make every %post check after it a no-op."""
     post = _post_statements()
@@ -515,7 +548,8 @@ def test_converter_import_check_asserts_the_pinned_pynidm(text, name):
     and the converter took its API for that major version."""
     check = re.search(CONVERTER_IMPORT_CHECK, text).group(0)
     major = PYNIDM_PIN.split(".")[0]
-    assert f"assert PYNIDM_MAJOR == {major} and v == '{PYNIDM_PIN}'" in check, check
+    assert (f"(PYNIDM_MAJOR != {major} or v != '{PYNIDM_PIN}') and sys.exit(" in check
+            and f"not the pinned {PYNIDM_PIN}'" in check), check
 
 
 def test_ci_installs_the_pinned_pynidm():
