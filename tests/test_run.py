@@ -474,6 +474,20 @@ class TestRun(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("usage: ants_seg_to_nidm", result.stdout)
 
+        # A working directory removed after the app started: os.getcwd()
+        # raises in the converter's interpreter, which must still start.
+        with tempfile.TemporaryDirectory() as parent:
+            gone = Path(parent) / "gone"
+            gone.mkdir()
+            result = subprocess.run(
+                ["sh", "-c", 'cd "$1" && rmdir "$1" && shift && exec "$@"', "sh", str(gone),
+                 sys.executable, "-c", CONVERTER_BOOTSTRAP, "-h"],
+                env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+                capture_output=True, text=True, timeout=300)
+            self.assertFalse(gone.exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("usage: ants_seg_to_nidm", result.stdout)
+
     def _parse_with_checked_out_converter(self, **kwargs):
         """Build the converter argv exactly as nidm_conversion does, then hand
         it to the argument parser of the converter checked out at

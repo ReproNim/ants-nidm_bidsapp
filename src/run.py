@@ -157,14 +157,16 @@ def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None, logger=Non
 # `python -c` puts the working directory first on sys.path (Python 3.10, the
 # image's, has no -P), and Python also reads an empty PYTHONPATH component as
 # the working directory. A converter checkout there would then replace the
-# installed converter, which the NIDM input check validated before
-# segmenting. The bootstrap drops every sys.path entry that is the working
-# directory before importing.
+# installed converter for the conversion only, after the NIDM input check
+# (run in the app process, which starts from the console script) passed on
+# the installed one. The bootstrap drops every sys.path entry that is the
+# working directory before importing; when the working directory no longer
+# exists (os.getcwd() raises), it drops only the empty entries.
 CONVERTER_MODULE = "ants_seg_to_nidm.ants_seg_to_nidm"
 CONVERTER_BOOTSTRAP = (
     "import os, sys; "
-    "cwd = os.getcwd(); "
-    "sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.curdir) != cwd]; "
+    'exec("try:\\n cwd = os.getcwd()\\nexcept OSError:\\n cwd = None"); '
+    "sys.path[:] = [p for p in sys.path if p and (cwd is None or os.path.abspath(p) != cwd)]; "
     f"from {CONVERTER_MODULE} import main; "
     'sys.argv[0] = "ants_seg_to_nidm"; '
     "sys.exit(main())"
