@@ -432,6 +432,48 @@ class TestRun(unittest.TestCase):
         self.assertTrue(any(line.startswith("ERROR:") and "Reading stats files" in line
                             for line in log), log)
 
+    def test_converter_bootstrap_ignores_a_converter_in_the_working_directory(self):
+        """The conversion runs as `python -c`, which puts the working directory
+        first on sys.path, and an empty PYTHONPATH component is read as the
+        working directory too. A converter checkout there must not replace the
+        installed converter that the NIDM input check validated."""
+        import subprocess
+        try:
+            import ants_seg_to_nidm.ants_seg_to_nidm  # noqa: F401
+        except ImportError:
+            if os.environ.get("CI"):
+                self.fail("CI must install the converter (src/ants_seg_to_nidm)")
+            self.skipTest("ants_seg_to_nidm not installed")
+
+        with tempfile.TemporaryDirectory() as cwd:
+            marker = Path(cwd) / "shadow-converter-ran"
+            shadow = Path(cwd) / "ants_seg_to_nidm"
+            shadow.mkdir()
+            (shadow / "__init__.py").write_text("")
+            (shadow / "ants_seg_to_nidm.py").write_text(
+                f"def main():\n    open({str(marker)!r}, 'w').close()\n    return 0\n")
+
+            def run(code, pythonpath=None):
+                env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+                if pythonpath is not None:
+                    env["PYTHONPATH"] = pythonpath
+                return subprocess.run([sys.executable, "-c", code, "-h"], cwd=cwd, env=env,
+                                      capture_output=True, text=True, timeout=300)
+
+            # Positive control: without the sys.path filter the checkout wins.
+            unfiltered = f"import sys; from {CONVERTER_MODULE} import main; sys.exit(main())"
+            result = run(unfiltered)
+            self.assertTrue(marker.exists(), (result.stdout, result.stderr))
+            marker.unlink()
+
+            inherited = os.environ.get("PYTHONPATH", "")
+            for pythonpath in (None, ":" + inherited, inherited + ":"):
+                with self.subTest(pythonpath=pythonpath):
+                    result = run(CONVERTER_BOOTSTRAP, pythonpath)
+                    self.assertFalse(marker.exists(), "the working directory's converter ran")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("usage: ants_seg_to_nidm", result.stdout)
+
     def _parse_with_checked_out_converter(self, **kwargs):
         """Build the converter argv exactly as nidm_conversion does, then hand
         it to the argument parser of the converter checked out at

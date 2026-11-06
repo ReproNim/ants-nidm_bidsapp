@@ -153,9 +153,18 @@ def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None, logger=Non
 # not with `python -m ants_seg_to_nidm.ants_seg_to_nidm`: the package
 # __init__ imports that module, so -m executed it twice and runpy warned
 # (RuntimeWarning, "found in sys.modules ...") on every run.
+#
+# `python -c` puts the working directory first on sys.path (Python 3.10, the
+# image's, has no -P), and Python also reads an empty PYTHONPATH component as
+# the working directory. A converter checkout there would then replace the
+# installed converter, which the NIDM input check validated before
+# segmenting. The bootstrap drops every sys.path entry that is the working
+# directory before importing.
 CONVERTER_MODULE = "ants_seg_to_nidm.ants_seg_to_nidm"
 CONVERTER_BOOTSTRAP = (
-    "import sys; "
+    "import os, sys; "
+    "cwd = os.getcwd(); "
+    "sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.curdir) != cwd]; "
     f"from {CONVERTER_MODULE} import main; "
     'sys.argv[0] = "ants_seg_to_nidm"; '
     "sys.exit(main())"
