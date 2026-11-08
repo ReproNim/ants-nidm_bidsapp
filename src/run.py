@@ -157,11 +157,15 @@ def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None, logger=Non
 # `python -c` puts the working directory first on sys.path (Python 3.10, the
 # image's, has no -P), and Python also reads an empty PYTHONPATH component as
 # the working directory. A converter checkout there would then replace the
-# installed converter for the conversion only, after the NIDM input check
-# (run in the app process, which starts from the console script) passed on
-# the installed one. The bootstrap drops every sys.path entry that is the
-# working directory before importing; when the working directory no longer
-# exists (os.getcwd() raises), it drops only the empty entries.
+# installed converter in the conversion. The bootstrap drops every sys.path
+# entry that is the working directory before importing; when the working
+# directory no longer exists (os.getcwd() raises), it drops only the empty
+# entries. This filters the conversion only. The app process, where the NIDM
+# input check runs, starts from the console script, so `-c`'s entry never
+# reaches it, but an empty PYTHONPATH component does, unfiltered. The
+# image's %environment never adds one; a host PYTHONPATH with a leading or
+# trailing colon can (Apptainer passes the host's through unless
+# --cleanenv, which BABS uses).
 CONVERTER_MODULE = "ants_seg_to_nidm.ants_seg_to_nidm"
 CONVERTER_BOOTSTRAP = (
     "import os, sys; "
