@@ -164,8 +164,10 @@ def find_nidm_input_file(nidm_input_dir, subject_id, session_id=None, logger=Non
 # input check runs, starts from the console script, so `-c`'s entry never
 # reaches it, but an empty PYTHONPATH component does, unfiltered. The
 # image's %environment never adds one; a host PYTHONPATH with a leading or
-# trailing colon can (Apptainer passes the host's through unless
-# --cleanenv, which BABS uses).
+# trailing colon can. Apptainer passes the host's environment through unless
+# run with --cleanenv, and BABS does not pass --cleanenv: its run script adds
+# only the config's singularity_args, so a BABS job sees the submitting
+# shell's PYTHONPATH.
 CONVERTER_MODULE = "ants_seg_to_nidm.ants_seg_to_nidm"
 CONVERTER_BOOTSTRAP = (
     "import os, sys; "

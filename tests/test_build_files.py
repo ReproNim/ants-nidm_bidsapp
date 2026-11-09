@@ -369,9 +369,9 @@ def _pythonpath_after(assignment, host_value):
 @pytest.mark.parametrize("host_value", [None, "", "/host/lib"])
 def test_environment_pythonpath_never_adds_the_working_directory(host_value):
     """An empty PYTHONPATH entry is the working directory to Python. With no
-    host PYTHONPATH (a BABS job, --cleanenv), `/opt:$PYTHONPATH` becomes
-    `/opt:`, and a converter checkout in the working directory then shadows
-    the installed converter."""
+    host PYTHONPATH (a host that sets none, or a run with --cleanenv),
+    `/opt:$PYTHONPATH` becomes `/opt:`, and a converter checkout in the
+    working directory then shadows the installed converter."""
     lines = [s for s in _singularity_section("environment") if "PYTHONPATH" in s]
     assert lines == ["export PYTHONPATH=/opt${PYTHONPATH:+:$PYTHONPATH}"], lines
     entries = _pythonpath_after(lines[0], host_value).split(":")
