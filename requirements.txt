@@ -6,18 +6,25 @@ pybids>=0.15.1
 pytest>=7.0.0
 natsort>=8.0.0
 # NIDM stack. Kept in lockstep with the sibling freesurfer-nidm app: the shared
-# NIDM input datasets (derivatives/nidm_4.5.0) are produced with PyNIDM 4.5.0,
-# and this file -- not src/ants_seg_to_nidm/requirements.txt -- is the single
-# source of truth for the container's NIDM pins.
-pynidm==4.5.0
-# PyNIDM 4.5.0 adds an oxigraph-backed rdflib store; pinned explicitly so the
-# runtime dep is visible. Requires rdflib<8 (see build files' rdflib upgrade).
+# NIDM input datasets are produced with bids2nidm from PyNIDM 5.0.0, and this
+# file is the single source of truth for the container's NIDM pins. The
+# converter is installed with --no-deps; its setup.py accepts PyNIDM 4.5 and 5
+# (pynidm>=4.5.0,<6), so every package it imports must be listed here or come
+# with one listed here (pandas and requests come with pynidm 5.0.0).
+# The converter imports nidm.linkml under PyNIDM 5 (the 4.x nidm.core and
+# nidm.experiment modules are gone).
+pynidm==5.0.0
+# oxigraph-backed rdflib store, declared by pynidm 5.0.0 itself (~=0.5.0);
+# pinned here so the runtime dep is visible.
 oxrdflib~=0.5.0
-# prov 3.0.0 moved NetworkX graph interop to the optional "graph" extra; pynidm's
-# nidm.experiment modules import prov.graph, so the extra (networkx) is required.
-# Without it `import ants_seg_to_nidm` dies with ModuleNotFoundError and every
-# NIDM conversion fails.
-prov[graph]
+# pynidm 5.0.0 declares rdflib>=6.3.2,<8 and oxrdflib 0.5 rdflib>=6.3,<8, so
+# rdflib 7 now satisfies every declared constraint and no forced upgrade step
+# is needed (pynidm 4.5.0 declared rdflib~=6.3.2 and needed one).
+rdflib>=7.0.0,<8
+# The converter imports prov.model directly. PyNIDM 4.x pulled prov in, and
+# its nidm.experiment needed prov's "graph" extra; PyNIDM 5 depends on neither,
+# so prov must be listed here or `import ants_seg_to_nidm` fails.
+prov
 # Registration runs on FireANTs (GPU). torch is installed separately in the
 # container with a CUDA index URL; the CPU wheel used by CI lives in
 # requirements-test.txt.

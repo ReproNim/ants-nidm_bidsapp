@@ -90,9 +90,8 @@ Pre-built images will be available once the app is published to Docker Hub. For 
 ```bash
 git clone --recursive https://github.com/ReproNim/ants-nidm_bidsapp.git
 cd ants-nidm_bidsapp
-pip install -e src/ants_seg_to_nidm
 pip install -r requirements.txt
-pip install --upgrade 'rdflib>=7.0.0,<8'
+pip install --no-deps -e src/ants_seg_to_nidm
 pip install -e .
 ```
 
@@ -100,9 +99,10 @@ pip install -e .
 `src/ants_seg_to_nidm`; without it that directory is empty and the NIDM
 conversion step fails. In an existing clone, run
 `git submodule update --init --recursive`. The install order matches the
-container recipes: the converter first, then `requirements.txt`, whose pins
-take precedence, then rdflib 7 (pynidm 4.5.0 declares rdflib<6.4 but its
-oxigraph store needs rdflib 7).
+container recipes: `requirements.txt` first, which pins the NIDM stack
+(PyNIDM 5.0.0, rdflib 7), then the converter with `--no-deps`, so that
+`requirements.txt` alone decides the installed versions (the converter itself
+accepts PyNIDM 4.5 and 5). PyNIDM 5.0.0 needs Python 3.10 or newer.
 
 ### Building Containers from Source
 
@@ -242,7 +242,8 @@ A checklist for a new dataset.
 4. **Point it at existing NIDM, if you have it.** With `--nidm-input-dir` the
    app adds its measures to each subject's NIDM file instead of starting a new
    one. Without the flag it looks in `<bids_dir>/../NIDM`. If nothing is found
-   it writes a new `nidm.ttl`. See [NIDM input](#nidm-input).
+   it writes a new `nidm.ttl`; if the file it finds does not contain the
+   subject, the job fails before segmentation. See [NIDM input](#nidm-input).
 5. **Run one subject first** with `run_container.sh` or
    `scripts/diag_babs_scratch.sbatch` (it checks the outputs for you), then
    the rest, under BABS or as a job array.
@@ -294,6 +295,14 @@ these is present, the app logs a warning and writes a `nidm.ttl` without the
 subject's demographics or input provenance. If the first one present is a
 symlink with no content behind it (a datalad/git-annex clone before
 `datalad get`), the run fails instead of treating it as a missing record.
+A subject whose id is not in the input NIDM it finds fails the job, before
+segmentation, with the converter's message: the file holds other subjects
+but not this one (ids are compared without `sub-` and leading zeros), or
+several nodes with its id and not exactly one of them owning an anatomical
+MRI acquisition, or several matching nodes that store the id differently
+(`sub-01` and `001`), even when exactly one of them owns the acquisition. An
+input with no subjects at all is not an error; the
+subject is added to it.
 
 ### Command-line Arguments
 

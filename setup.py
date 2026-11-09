@@ -273,7 +273,7 @@ if "install" in sys.argv:
 
 setup(
     name="ants-nidm",
-    version="0.2.2",
+    version="0.2.3",
     description="BIDS App for ANTs Segmentation with NIDM Output",
     author="ReproNim",
     author_email="repronim@gmail.com",
@@ -286,7 +286,6 @@ setup(
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Medical Science Apps.",
         "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
@@ -296,6 +295,6 @@ setup(
             "ants-nidm=src.run:main",
         ],
     },
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     install_requires=install_requires,
 ) 

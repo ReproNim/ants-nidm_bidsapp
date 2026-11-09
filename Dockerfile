@@ -152,14 +152,20 @@ COPY README.md /app/
 
 # Install the application and NIDM conversion toolkit.
 # Order matters and mirrors Singularity (and the sibling freesurfer-nidm app):
-# the NIDM submodule first with its loose deps, then the top-level
-# requirements.txt applies the authoritative pins on top. The submodule's own
-# requirements.txt is deliberately NOT installed -- it pins pynidm==4.2.4, which
-# would silently override the 4.5.0 pin here.
-RUN pip3 install -e src/ants_seg_to_nidm && \
-    pip3 install -r requirements.txt && \
-    pip3 install --no-cache-dir --upgrade 'rdflib>=7.0.0,<8' && \
+# the top-level requirements.txt goes first and is the only place the NIDM
+# stack is pinned (pynidm 5.0.0, oxrdflib, rdflib 7, prov). The converter
+# submodule is then installed with --no-deps, so the image holds exactly what
+# requirements.txt resolves to: the converter's own setup.py declares looser
+# ranges (pynidm>=4.5.0,<6, and prov[graph], whose graph extra only PyNIDM 4.x
+# needs), and its requirements.txt is its test environment, not installed here.
+# Because nothing then checks the converter's dependencies at install time,
+# the last step imports the converter module the app runs (not only its
+# PyNIDM shim), so a runtime dependency missing from requirements.txt fails
+# the build rather than every subject's conversion.
+RUN pip3 install -r requirements.txt && \
+    pip3 install --no-deps -e src/ants_seg_to_nidm && \
     pip3 install -e . && \
+    python3 -c "import importlib.metadata as m, sys; from ants_seg_to_nidm.ants_seg_to_nidm import main; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); (PYNIDM_MAJOR != 5 or v != '5.0.0') and sys.exit('converter runs on PyNIDM %s (API %s), not the pinned 5.0.0' % (v, PYNIDM_MAJOR)); print('converter imports on PyNIDM', v)" && \
     chmod -R 755 /app
 
 # Set environment variables
@@ -202,6 +208,6 @@ ENTRYPOINT ["/entrypoint.sh"]
 # does not invalidate the cached layers above.
 ARG GIT_COMMIT=unknown
 # The version label overrides the base image's own (e.g. Ubuntu's 22.04).
-LABEL org.opencontainers.image.version=0.2.2 \
+LABEL org.opencontainers.image.version=0.2.3 \
       org.opencontainers.image.revision=$GIT_COMMIT \
       org.opencontainers.image.source=https://github.com/ReproNim/ants-nidm_bidsapp

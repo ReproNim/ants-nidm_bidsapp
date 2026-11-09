@@ -37,7 +37,8 @@ FUSED_OPS_ASSERTION_CMD = r'python3 -c "import torch, fireants_fused_ops'
 
 
 def _post_statements():
-    """Non-blank, non-comment lines of Singularity's %post, stripped."""
+    """Non-blank, non-comment lines of Singularity's %post, stripped, with
+    `\\`-continuation lines joined into the line they continue."""
     # Anchor on the section header at the start of a line: "%post" also occurs
     # in prose inside the header comment.
     post = re.search(r"^%post\s*$", SINGULARITY, re.MULTILINE)
@@ -45,11 +46,24 @@ def _post_statements():
     rest = SINGULARITY[post.end():]
     nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
     body = rest[: nxt.start()] if nxt else rest
-    return [
-        line.strip()
-        for line in body.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    return _join_continuations(body)
+
+
+def _join_continuations(text):
+    """Non-blank, non-comment lines, stripped, a line ending in `\\` joined
+    with the lines it continues: one entry per shell command line."""
+    joined, current = [], []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        current.append(s[:-1].rstrip() if s.endswith("\\") else s)
+        if not s.endswith("\\"):
+            joined.append(" ".join(current))
+            current = []
+    if current:
+        joined.append(" ".join(current))
+    return joined
 
 
 def _commands(text):
@@ -263,3 +277,281 @@ def test_build_fails_on_files_other_users_cannot_read(text, name):
     # explicit exit, in the Dockerfile on the RUN's exit status.
     tail = "\n".join(commands[checks[-1]:checks[-1] + 6])
     assert "exit 1" in tail, f"{name}: the readability check must exit non-zero"
+
+
+# The converter is installed with --no-deps (requirements.txt alone decides the
+# image's packages), so nothing at install time checks that its runtime
+# imports are present; a missing one would surface only when the first
+# subject's conversion runs, after segmentation. The build therefore imports
+# the module the app runs, not only its PyNIDM shim.
+CONVERTER_IMPORT_CHECK = (
+    r'python3 -c "[^"\n]*from ants_seg_to_nidm\.ants_seg_to_nidm import main[^"\n]*"'
+)
+
+
+@pytest.mark.parametrize("text, name", BUILD_FILES, ids=BUILD_IDS)
+def test_build_imports_the_converter_module_the_app_runs(text, name):
+    install = re.search(r"pip3? install --no-deps -e (?:src/ants_seg_to_nidm|\.)", text)
+    assert install, f"{name}: converter install not found"
+    check = re.search(CONVERTER_IMPORT_CHECK, text)
+    assert check, f"{name}: no build step imports ants_seg_to_nidm.ants_seg_to_nidm"
+    assert check.start() > install.start(), f"{name}: the import check runs before the install"
+
+
+def test_no_text_says_the_converter_declares_pynidm_4_5():
+    """The converter's setup.py declares pynidm>=4.5.0,<6 since d72e752; the
+    build files and docs once gave its pinning 4.5.0 as the reason for
+    --no-deps."""
+    for path in ("Dockerfile", "Singularity", "README.md", "requirements.txt"):
+        text = " ".join((ROOT / path).read_text().split())
+        for claim in (r"declares\s+pynidm==4\.5\.0", r"still\s+names?\s+(PyNIDM\s+)?4\.5\.0",
+                      r"metadata still names"):
+            assert not re.search(claim, text, re.IGNORECASE), (path, claim)
+
+
+def _singularity_section(name):
+    """Non-blank, non-comment lines of a Singularity section, stripped."""
+    head = re.search(rf"^%{name}\s*$", SINGULARITY, re.MULTILINE)
+    assert head, f"Singularity has no %{name} section"
+    rest = SINGULARITY[head.end():]
+    nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
+    return _commands(rest[: nxt.start()] if nxt else rest)
+
+
+CONSOLE_SCRIPT = 'exec ants-nidm "$@"'
+
+
+def test_runscript_starts_the_console_script():
+    """`apptainer run` (how BABS starts the app) must go through the console
+    script. `python3 /opt/src/run.py` puts /opt/src first on sys.path, where
+    the converter checkout shadows the installed package and the NIDM input
+    check fails to import for every subject that has an input."""
+    runscript = _singularity_section("runscript")
+    assert runscript == [CONSOLE_SCRIPT], runscript
+    assert not any(re.search(r"\brun\.py\b", line) for line in runscript)
+
+
+def test_docker_entrypoint_starts_the_same_console_script():
+    assert re.search(r"""echo '#!/bin/bash\\nexec ants-nidm "\$@"' > /entrypoint\.sh""",
+                     DOCKERFILE)
+    assert 'ENTRYPOINT ["/entrypoint.sh"]' in DOCKERFILE
+
+
+def test_console_script_is_declared():
+    setup = (ROOT / "setup.py").read_text()
+    assert re.search(r"""["']ants-nidm\s*=\s*src\.run:main["']""", setup)
+
+
+def test_build_checks_the_lookup_import_as_the_console_script_resolves_it():
+    """The build must fail if the console script is missing or if, with its
+    directory first on sys.path, the converter lookup does not import."""
+    post = _post_statements()
+    app_install = [i for i, s in enumerate(post) if s == "python3 -m pip install -e ."]
+    assert app_install, "app install not found in %post"
+    exists = [i for i, s in enumerate(post) if s == "command -v ants-nidm"]
+    check = [i for i, s in enumerate(post)
+             if "sys.path[0] = os.path.dirname(shutil.which('ants-nidm'))" in s
+             and "from ants_seg_to_nidm.ants_seg_to_nidm import SubjectLookupError, find_subject" in s]
+    assert exists and check, "the console-script checks are missing from %post"
+    assert min(exists[0], check[0]) > app_install[-1]
+
+
+def _pythonpath_after(assignment, host_value):
+    """PYTHONPATH after `assignment` runs in sh, starting from host_value
+    (None = unset). %environment is sourced by a POSIX shell."""
+    import subprocess
+    prelude = "unset PYTHONPATH" if host_value is None else f"export PYTHONPATH='{host_value}'"
+    out = subprocess.run(["sh", "-c", f'{prelude}; {assignment}; printf %s "$PYTHONPATH"'],
+                         capture_output=True, text=True, check=True)
+    return out.stdout
+
+
+@pytest.mark.parametrize("host_value", [None, "", "/host/lib"])
+def test_environment_pythonpath_never_adds_the_working_directory(host_value):
+    """An empty PYTHONPATH entry is the working directory to Python. With no
+    host PYTHONPATH (a BABS job, --cleanenv), `/opt:$PYTHONPATH` becomes
+    `/opt:`, and a converter checkout in the working directory then shadows
+    the installed converter."""
+    lines = [s for s in _singularity_section("environment") if "PYTHONPATH" in s]
+    assert lines == ["export PYTHONPATH=/opt${PYTHONPATH:+:$PYTHONPATH}"], lines
+    entries = _pythonpath_after(lines[0], host_value).split(":")
+    assert "" not in entries, entries
+    assert entries[0] == "/opt"
+    if host_value:
+        assert entries[1:] == [host_value]
+
+
+@pytest.mark.parametrize("assignment", [
+    "export PYTHONPATH=/opt:$PYTHONPATH", "export PYTHONPATH=$PYTHONPATH:/opt"])
+def test_pythonpath_check_rejects_a_trailing_empty_entry(assignment):
+    """Positive control for the test above: the old form does leave an empty
+    entry when the host has no PYTHONPATH."""
+    assert "" in _pythonpath_after(assignment, None).split(":")
+
+
+def test_dockerfile_does_not_extend_pythonpath():
+    """Docker has no host PYTHONPATH, so `ENV PYTHONPATH=/opt:$PYTHONPATH`
+    would also end in an empty entry. The image does not need one at all."""
+    env = [c for c in _commands(DOCKERFILE) if re.match(r"ENV\s+PYTHONPATH\b", c)]
+    assert all(re.fullmatch(r"ENV\s+PYTHONPATH=/opt", c) for c in env), env
+
+
+CONVERTER_FILE = "/opt/src/ants_seg_to_nidm/ants_seg_to_nidm/ants_seg_to_nidm.py"
+CONVERTER_PACKAGE_FILE = "/opt/src/ants_seg_to_nidm/ants_seg_to_nidm/__init__.py"
+
+
+def _shell_outside_quotes(line):
+    """The line with double-quoted strings removed: the shell part only."""
+    return re.sub(r'"(?:[^"\\]|\\.)*"', '""', line)
+
+
+def _lookup_check():
+    post = _post_statements()
+    check = [s for s in post
+             if "sys.path[0] = os.path.dirname(shutil.which('ants-nidm'))" in s]
+    assert len(check) == 1, check
+    return check[0]
+
+
+def test_lookup_check_asserts_the_image_s_own_converter_file():
+    """Importing the lookup proves only that some copy of the converter is
+    importable; the check must name the file the image installed, and that
+    the package is the real one, not a namespace package rooted at a checkout."""
+    check = _lookup_check()
+    assert f"m.__file__ != '{CONVERTER_FILE}'" in check, check
+    assert f"p.__file__ != '{CONVERTER_PACKAGE_FILE}'" in check, check
+    assert "sys.exit(" in check, check
+
+
+def test_lookup_check_runs_with_the_runtime_pythonpath():
+    """At run time sys.path is the console script's dir, then PYTHONPATH as
+    %environment sets it with no host value, which is /opt."""
+    assert _lookup_check().startswith('PYTHONPATH=/opt python3 -c "'), _lookup_check()
+
+
+# Every python check a build relies on. Each must be able to fail the build.
+BUILD_CHECKS = [
+    ("Dockerfile", "fused_ops", FUSED_OPS_ASSERTION_CMD),
+    ("Dockerfile", "converter import", CONVERTER_IMPORT_CHECK),
+    ("Singularity", "fused_ops", FUSED_OPS_ASSERTION_CMD),
+    ("Singularity", "converter import", CONVERTER_IMPORT_CHECK),
+    ("Singularity", "lookup", re.escape("sys.path[0] = os.path.dirname(shutil.which('ants-nidm'))")),
+]
+PYTHON_C = r'python3 -c "(?:[^"\\]|\\.)*"'
+
+
+def _check_unit(name, pattern):
+    """The unit whose exit status decides whether the check fails the build:
+    the whole RUN instruction in the Dockerfile, the %post command line in
+    Singularity (which runs under `set -e`), continuation lines joined."""
+    units = _join_continuations(DOCKERFILE) if name == "Dockerfile" else _post_statements()
+    found = [u for u in units if re.search(pattern, u)]
+    assert len(found) == 1, (name, pattern, found)
+    return found[0]
+
+
+def _post_keeps_errexit(statements):
+    """`set -e` first, and no later `set` turns it off (`set +e`, `set -x +e`,
+    `set +o errexit`)."""
+    return statements[:1] == ["set -e"] and not any(
+        re.search(r"\bset\b[^;&|]*?\s(\+[A-Za-z]*e|\+o\s+errexit\b)", s) for s in statements)
+
+
+def _can_fail_the_build(unit, name, post=None):
+    """Whether a failing check fails the build.
+
+    Singularity: the %post command line is the check alone, optionally with
+    PYTHONPATH=/opt in front, and %post keeps `set -e`. Anything else on the
+    line (`|| true`, `!`, `if ...`, a continuation) can swallow its status.
+    Dockerfile: a plain RUN instruction (no heredoc, which runs without
+    `set -e`) whose commands are joined by `&&` only, with no `!`, and the
+    check right after `RUN` or an `&&`.
+    Either way, no `python3 -O`."""
+    shell = _shell_outside_quotes(unit)
+    if re.search(r"python3\s+-O", shell):
+        return False
+    if name == "Dockerfile":
+        return (shell.startswith("RUN ") and "<<" not in shell
+                and re.search(r'(^RUN |&& )python3 -c ""', shell) is not None
+                and not re.search(r";|\||(?<!&)&(?!&)|(^|\s)!(\s|$)", shell))
+    return (re.fullmatch(r'(PYTHONPATH=/opt )?python3 -c ""', shell) is not None
+            and _post_keeps_errexit(_post_statements() if post is None else post))
+
+
+SWALLOWING_SUFFIXES = [" || true", " || :", " || exit 0", "; true", " || echo skipped", " &", " | cat",
+                       " \\\n    || true"]
+SWALLOWING_PREFIXES = ["! ", "if ", "true || "]
+
+
+@pytest.mark.parametrize("name, check, pattern", BUILD_CHECKS,
+                         ids=[f"{n}-{c}" for n, c, _ in BUILD_CHECKS])
+@pytest.mark.parametrize("prefix, suffix", [("", "")] + [("", s) for s in SWALLOWING_SUFFIXES]
+                         + [(p, "") for p in SWALLOWING_PREFIXES])
+def test_build_checks_can_fail_the_build(name, check, pattern, prefix, suffix):
+    """Nothing around a python check may swallow its exit status. The
+    prefixes and suffixes are mutants of the recipe text, re-parsed the way
+    the tests parse the recipe (a suffix with a backslash-newline puts
+    `|| true` on a continuation line); only the unchanged text passes."""
+    text = DOCKERFILE if name == "Dockerfile" else SINGULARITY
+    unit = _check_unit(name, pattern)
+    code = list(re.finditer(PYTHON_C, unit))
+    assert len(code) == 1, (name, check, unit)
+    assert text.count(code[0].group(0)) == 1, (name, check)
+    s = text.index(code[0].group(0))
+    e = s + len(code[0].group(0))
+    mutated = text[:s] + prefix + text[s:e] + suffix + text[e:]
+    if name == "Dockerfile":
+        units = _join_continuations(mutated)
+    else:
+        post = re.search(r"^%post\s*$", mutated, re.MULTILINE)
+        rest = mutated[post.end():]
+        nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
+        units = _join_continuations(rest[: nxt.start()] if nxt else rest)
+    found = [u for u in units if code[0].group(0) in u]
+    assert len(found) == 1, (name, check, prefix, suffix, found)
+    ok = _can_fail_the_build(found[0], name, post=None if name == "Dockerfile" else units)
+    assert ok == (prefix == suffix == ""), (name, check, prefix, suffix, found[0])
+
+
+@pytest.mark.parametrize("name, check, pattern", BUILD_CHECKS,
+                         ids=[f"{n}-{c}" for n, c, _ in BUILD_CHECKS])
+def test_build_checks_do_not_rely_on_assert(name, check, pattern):
+    """python3 -O and PYTHONOPTIMIZE drop asserts; a check exits explicitly."""
+    code = re.search(PYTHON_C, _check_unit(name, pattern)).group(0)
+    assert not re.search(r"\bassert\b", code), code
+
+
+@pytest.mark.parametrize("name, check, pattern", BUILD_CHECKS,
+                         ids=[f"{n}-{c}" for n, c, _ in BUILD_CHECKS])
+def test_build_checks_reject_python_optimize(name, check, pattern):
+    unit = _check_unit(name, pattern)
+    assert _can_fail_the_build(unit, name)
+    assert not _can_fail_the_build(unit.replace("python3 -c", "python3 -O -c", 1), name)
+
+
+@pytest.mark.parametrize("off", ["set +e", "set +o errexit", "set +eu", "set -x +e", "set -o pipefail +o errexit"])
+def test_post_errexit_cannot_be_turned_off_later(off):
+    """A later `set +e` would make every %post check after it a no-op."""
+    post = _post_statements()
+    assert _post_keeps_errexit(post)
+    assert not _post_keeps_errexit(post[:2] + [off] + post[2:])
+    unit = _check_unit("Singularity", CONVERTER_IMPORT_CHECK)
+    assert not _can_fail_the_build(unit, "Singularity", post=post[:2] + [off] + post[2:])
+
+
+PYNIDM_PIN = re.search(r"^pynidm==([\d.]+)\s*$", REQUIREMENTS, re.MULTILINE).group(1)
+
+
+@pytest.mark.parametrize("text, name", BUILD_FILES, ids=BUILD_IDS)
+def test_converter_import_check_asserts_the_pinned_pynidm(text, name):
+    """The build fails unless the installed PyNIDM is requirements.txt's pin
+    and the converter took its API for that major version."""
+    check = re.search(CONVERTER_IMPORT_CHECK, text).group(0)
+    major = PYNIDM_PIN.split(".")[0]
+    assert (f"(PYNIDM_MAJOR != {major} or v != '{PYNIDM_PIN}') and sys.exit(" in check
+            and f"not the pinned {PYNIDM_PIN}'" in check), check
+
+
+def test_ci_installs_the_pinned_pynidm():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert set(re.findall(r"pynidm==([\d.]+)", ci)) == {PYNIDM_PIN}

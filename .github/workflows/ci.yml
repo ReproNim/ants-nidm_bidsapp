@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
     - uses: actions/checkout@v4
@@ -29,6 +29,9 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -e .
+        # The converter's own argument parser checks the argv the app builds
+        # (tests/test_run.py); it imports PyNIDM, pinned as in requirements.txt.
+        pip install pynidm==5.0.0 -e src/ants_seg_to_nidm
         pip install pytest pytest-cov
     - name: Run tests
       run: |

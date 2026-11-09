@@ -44,7 +44,7 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     # same key in %labels (it warns "already exists ... not overwriting"); a
     # label written here replaces it either way. SingularityCE sets only
     # SINGULARITY_LABELS, hence the fallback.
-    echo "org.opencontainers.image.version 0.2.2" >> "${APPTAINER_LABELS:-$SINGULARITY_LABELS}"
+    echo "org.opencontainers.image.version 0.2.3" >> "${APPTAINER_LABELS:-$SINGULARITY_LABELS}"
 
     export DEBIAN_FRONTEND=noninteractive
     # The CUDA base image ships nvcc but no Python; python3.10/python3-pip are
@@ -208,18 +208,36 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
 
     # Install Python dependencies and application code.
     # Order matters and mirrors the Dockerfile (and the sibling freesurfer-nidm
-    # app): the NIDM submodule goes in first with its loose deps, then the
-    # top-level requirements.txt applies the authoritative pins on top. The
-    # submodule's own requirements.txt is deliberately NOT installed -- it pins
-    # pynidm==4.2.4, which would silently override the 4.5.0 pin here.
-    cd /opt/src/ants_seg_to_nidm
-    python3 -m pip install -e .
-
+    # app): the top-level requirements.txt goes first and is the only place
+    # the NIDM stack is pinned (pynidm 5.0.0, oxrdflib, rdflib 7, prov). The
+    # converter submodule is then installed with --no-deps, so the image holds
+    # exactly what requirements.txt resolves to: the converter's own setup.py
+    # declares looser ranges (pynidm>=4.5.0,<6, and prov[graph], whose graph
+    # extra only PyNIDM 4.x needs), and its requirements.txt is its test
+    # environment, not installed here.
     cd /opt
     python3 -m pip install -r requirements.txt
-    # oxrdflib (pulled in by pynidm 4.5.0) requires rdflib<8; pynidm wants >=7.
-    python3 -m pip install --no-cache-dir --upgrade 'rdflib>=7.0.0,<8'
+
+    cd /opt/src/ants_seg_to_nidm
+    python3 -m pip install --no-deps -e .
+
+    cd /opt
     python3 -m pip install -e .
+    # The converter picks its PyNIDM API by what is installed; fail the build
+    # if it would not run on the pinned 5.0.0. Import the converter module the
+    # app runs, not only its PyNIDM shim: with --no-deps nothing else checks
+    # its dependencies, and a missing one should fail the build rather than
+    # every subject's conversion.
+    python3 -c "import importlib.metadata as m, sys; from ants_seg_to_nidm.ants_seg_to_nidm import main; from ants_seg_to_nidm._pynidm import PYNIDM_MAJOR; v = m.version('pynidm'); (PYNIDM_MAJOR != 5 or v != '5.0.0') and sys.exit('converter runs on PyNIDM %s (API %s), not the pinned 5.0.0' % (v, PYNIDM_MAJOR)); print('converter imports on PyNIDM', v)"
+    # The runscript starts the console script; check that it exists and that,
+    # with sys.path as it is at run time (the console script's directory, then
+    # PYTHONPATH as %environment sets it with no host value), the NIDM input
+    # check's import resolves to this image's installed converter file through
+    # the real package, not another copy or a namespace package rooted at a
+    # checkout. Exit non-zero otherwise (sys.exit, not assert: python3 -O
+    # would drop an assert).
+    command -v ants-nidm
+    PYTHONPATH=/opt python3 -c "import os, shutil, sys; sys.path[0] = os.path.dirname(shutil.which('ants-nidm')); from ants_seg_to_nidm.ants_seg_to_nidm import SubjectLookupError, find_subject; import ants_seg_to_nidm as p, ants_seg_to_nidm.ants_seg_to_nidm as m; (m.__file__ != '/opt/src/ants_seg_to_nidm/ants_seg_to_nidm/ants_seg_to_nidm.py' or p.__file__ != '/opt/src/ants_seg_to_nidm/ants_seg_to_nidm/__init__.py') and sys.exit('ants-nidm would import the converter from %s (package %s)' % (m.__file__, p.__file__)); print('ants-nidm resolves the converter lookup from', m.__file__)"
 
     # Mirror Docker's writable scratch directory
     mkdir -p /work
@@ -235,8 +253,10 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     fi
 
 %environment
-    # Add opt to Python path
-    export PYTHONPATH=/opt:$PYTHONPATH
+    # Add /opt to the Python path. No empty entry when the host sets no
+    # PYTHONPATH: Python reads an empty entry as the working directory, where a
+    # converter checkout would shadow the installed converter.
+    export PYTHONPATH=/opt${PYTHONPATH:+:$PYTHONPATH}
     # CUDA toolchain from the nvidia/cuda base image
     export CUDA_HOME=/usr/local/cuda
     # Add Python packages to path
@@ -249,16 +269,21 @@ From: nvidia/cuda:12.1.1-devel-ubuntu22.04
     export TMP=/work
 
 %runscript
-    # Execute the Python entry point directly
-    python3 /opt/src/run.py "$@"
+    # Start the app through its console script, as the Dockerfile's entrypoint
+    # does. Not `python3 /opt/src/run.py`: that puts /opt/src first on
+    # sys.path, where the converter's checkout (/opt/src/ants_seg_to_nidm, no
+    # __init__.py) shadows the installed package, so
+    # `ants_seg_to_nidm.ants_seg_to_nidm` resolves to the checkout's inner
+    # package directory and the NIDM input check fails to import.
+    exec ants-nidm "$@"
 
 %help
-    ANTs BIDS App 0.2.2
+    ANTs BIDS App 0.2.3
 
     This container performs ANTs-based segmentation and converts results to NIDM format.
 
     Version Information:
-    - ANTs BIDS App: 0.2.2
+    - ANTs BIDS App: 0.2.3
     - Python: 3.10
     - Base: nvidia/cuda:12.1.1-devel-ubuntu22.04
 

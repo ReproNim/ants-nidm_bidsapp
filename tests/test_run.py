@@ -79,7 +79,7 @@ from src.antspy.inputs import AnatChoice
 from src.run import (process_participant, process_session, main, nidm_conversion,
                      create_dataset_description, subject_output_dir,
                      find_nidm_input_file, save_processing_summary,
-                     BIDS_VERSION, APP_VERSION)
+                     BIDS_VERSION, APP_VERSION, CONVERTER_BOOTSTRAP, CONVERTER_MODULE)
 
 class TestRun(unittest.TestCase):
     """Test cases for the run module"""
@@ -283,6 +283,324 @@ class TestRun(unittest.TestCase):
 
         self.assertTrue(holder.get("choices"), "could not read --method choices")
         self.assertEqual(set(LABEL_PROTOCOL_BY_METHOD), holder["choices"])
+
+    def _run_conversion(self, returncode=0, stderr="", stdout="", **kwargs):
+        """Run nidm_conversion with the converter mocked; return (result, argv, log)."""
+        derivatives_dir = self.create_derivatives_structure()
+        subject_dir = os.path.join(derivatives_dir, "sub-01", "ses-01")
+        with patch('subprocess.run') as mock_run:
+            mock_process = MagicMock()
+            mock_process.returncode = returncode
+            mock_process.stdout = stdout
+            mock_process.stderr = stderr
+
+            def convert(*a, **kw):
+                if returncode == 0:
+                    with open(os.path.join(subject_dir, "nidm.ttl"), "w") as f:
+                        f.write("@prefix nidm: <http://purl.org/nidash/nidm#> .\n")
+                return mock_process
+            mock_run.side_effect = convert
+
+            with self.assertLogs(self.logger, level="INFO") as log:
+                result = nidm_conversion(self.logger, derivatives_dir, "01",
+                                         bids_session="01", method="fusion", **kwargs)
+        mock_run.assert_called_once()
+        return result, mock_run.call_args[0][0], log.output
+
+    def _input_nidm(self):
+        path = os.path.join(self.temp_dir, "input_nidm.ttl")
+        with open(path, "w") as f:
+            f.write("@prefix nidm: <http://purl.org/nidash/nidm#> .\n")
+        return path
+
+    def test_converter_is_told_which_t1w_was_segmented(self):
+        """With an input NIDM the converter links the stats to the acquisition
+        whose file name is the T1w the app segmented; with several anatomical
+        acquisitions and no name it links none."""
+        t1w = Path(self.bids_dir) / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_run-2_T1w.nii.gz"
+        result, cmd, _ = self._run_conversion(nidm_input_file=self._input_nidm(),
+                                              input_file=t1w)
+        self.assertTrue(result)
+        self.assertIn("-acq_filename", cmd)
+        self.assertEqual(cmd[cmd.index("-acq_filename") + 1], "sub-01_ses-01_run-2_T1w.nii.gz")
+        self.assertIn("--nidm", cmd)
+
+    def _odd_paths(self):
+        """An input NIDM and a T1w whose paths hold spaces, quotes and '#'."""
+        odd_dir = Path(self.temp_dir) / "in put's \"dir\" #2"
+        odd_dir.mkdir()
+        nidm = odd_dir / "nidm input.ttl"
+        nidm.write_text("@prefix nidm: <http://purl.org/nidash/nidm#> .\n")
+        t1w = odd_dir / "sub-01_ses-01_T1w (copy).nii.gz"
+        return nidm, t1w
+
+    def _logged_command(self, log):
+        lines = [line.split("Running command: ", 1)[1] for line in log
+                 if "Running command: " in line]
+        self.assertEqual(len(lines), 1, log)
+        return lines[0]
+
+    def test_logged_command_splits_back_into_the_exact_argv(self):
+        """The log line is the argv shell-quoted: the -c bootstrap and paths
+        with spaces, quotes and '#' survive a shlex round trip."""
+        import shlex
+        nidm, t1w = self._odd_paths()
+        result, cmd, log = self._run_conversion(nidm_input_file=str(nidm), input_file=t1w)
+        self.assertTrue(result)
+        self.assertEqual(shlex.split(self._logged_command(log)), cmd)
+
+    def _replay_helper(self):
+        import importlib.util
+        path = Path(project_root) / "scripts" / "replay_nidm_from_log.py"
+        spec = importlib.util.spec_from_file_location("replay_nidm_from_log", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_replay_helper_recovers_the_converter_argv_from_the_log(self):
+        """scripts/replay_nidm_from_log.py reads the -c form the app logs:
+        the converter module and exactly the arguments after the bootstrap."""
+        replay = self._replay_helper()
+        nidm, t1w = self._odd_paths()
+        _, cmd, log = self._run_conversion(nidm_input_file=str(nidm), input_file=t1w)
+        log_file = Path(self.temp_dir) / "ants.log"
+        log_file.write_text("\n".join(log) + "\n")
+        entries = replay._parse_log(log_file)
+        self.assertEqual(len(entries), 1)
+        module, args = replay._split_command(entries[0]["command"])
+        self.assertEqual(module, CONVERTER_MODULE)
+        self.assertEqual(args, cmd[3:])
+
+    def test_replay_helper_refuses_c_code_that_is_not_the_converter(self):
+        replay = self._replay_helper()
+        with self.assertRaises(ValueError):
+            replay._split_command("python3 -c 'print(1)' -f a,b,c")
+        # Logs from before 0.2.3 used -m.
+        self.assertEqual(
+            replay._split_command("python -m ants_seg_to_nidm.ants_seg_to_nidm -f 'a b,c' -o x"),
+            ("ants_seg_to_nidm.ants_seg_to_nidm", ["-f", "a b,c", "-o", "x"]))
+
+    def test_no_acq_filename_without_an_input_nidm(self):
+        """The converter rejects -acq_filename without -n: there is no
+        acquisition to link."""
+        t1w = Path(self.bids_dir) / "sub-01" / "anat" / "sub-01_T1w.nii.gz"
+        result, cmd, _ = self._run_conversion(input_file=t1w)
+        self.assertTrue(result)
+        self.assertNotIn("-acq_filename", cmd)
+
+    def test_no_acq_filename_without_a_known_input(self):
+        result, cmd, _ = self._run_conversion(nidm_input_file=self._input_nidm())
+        self.assertTrue(result)
+        self.assertNotIn("-acq_filename", cmd)
+
+    def test_converter_failure_fails_the_conversion_with_its_stderr_logged(self):
+        message = "ERROR: Subject ID sub-01 was not found in the input NIDM, which has subject IDs: 02"
+        result, _, log = self._run_conversion(returncode=1, stderr=message,
+                                              nidm_input_file=self._input_nidm())
+        self.assertFalse(result)
+        self.assertTrue(any(line.startswith("ERROR:") and message in line for line in log), log)
+
+    def test_converter_stderr_on_success_is_logged_as_warnings(self):
+        """A successful ants_seg_to_nidm run reports reduced provenance (stats
+        not linked to an acquisition, a new subject agent) only on stderr."""
+        stderr = ("/x/ants_seg_to_nidm.py:190: UserWarning: 0 anatomical AcquisitionObjects with "
+                  "file name sub-01_T1w.nii.gz found for subject sub-01; the stats are not linked\n"
+                  "  warnings.warn(\n"
+                  "\n"
+                  "The input NIDM has no subject agents; adding a new agent for sub-01 (--forcenidm)\n")
+        result, _, log = self._run_conversion(stderr=stderr, nidm_input_file=self._input_nidm())
+        self.assertTrue(result)
+        warnings = [line for line in log if line.startswith("WARNING:")]
+        self.assertEqual(warnings, [
+            "WARNING:test_logger:ants_seg_to_nidm: /x/ants_seg_to_nidm.py:190: UserWarning: 0 anatomical "
+            "AcquisitionObjects with file name sub-01_T1w.nii.gz found for subject sub-01; the stats are not linked",
+            "WARNING:test_logger:ants_seg_to_nidm: warnings.warn(",
+            "WARNING:test_logger:ants_seg_to_nidm: The input NIDM has no subject agents; adding a new "
+            "agent for sub-01 (--forcenidm)",
+        ])
+
+    def test_converter_success_without_stderr_logs_no_warning(self):
+        result, _, log = self._run_conversion(nidm_input_file=self._input_nidm())
+        self.assertTrue(result)
+        self.assertEqual([line for line in log if line.startswith("WARNING:")], [])
+
+    def test_converter_failure_logs_its_stdout(self):
+        result, _, log = self._run_conversion(returncode=1, stderr="error: boom",
+                                              stdout="Reading stats files\n",
+                                              nidm_input_file=self._input_nidm())
+        self.assertFalse(result)
+        self.assertTrue(any(line.startswith("ERROR:") and "Reading stats files" in line
+                            for line in log), log)
+
+    def test_converter_bootstrap_ignores_a_converter_in_the_working_directory(self):
+        """The conversion runs as `python -c`, which puts the working directory
+        first on sys.path, and an empty PYTHONPATH component is read as the
+        working directory too. A converter checkout there must not replace the
+        installed converter that the NIDM input check validated."""
+        import subprocess
+        try:
+            import ants_seg_to_nidm.ants_seg_to_nidm  # noqa: F401
+        except ImportError:
+            if os.environ.get("CI"):
+                self.fail("CI must install the converter (src/ants_seg_to_nidm)")
+            self.skipTest("ants_seg_to_nidm not installed")
+
+        with tempfile.TemporaryDirectory() as cwd:
+            marker = Path(cwd) / "shadow-converter-ran"
+            shadow = Path(cwd) / "ants_seg_to_nidm"
+            shadow.mkdir()
+            (shadow / "__init__.py").write_text("")
+            (shadow / "ants_seg_to_nidm.py").write_text(
+                f"def main():\n    open({str(marker)!r}, 'w').close()\n    return 0\n")
+
+            def run(code, pythonpath=None):
+                env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+                if pythonpath is not None:
+                    env["PYTHONPATH"] = pythonpath
+                return subprocess.run([sys.executable, "-c", code, "-h"], cwd=cwd, env=env,
+                                      capture_output=True, text=True, timeout=300)
+
+            # Positive control: without the sys.path filter the checkout wins.
+            unfiltered = f"import sys; from {CONVERTER_MODULE} import main; sys.exit(main())"
+            result = run(unfiltered)
+            self.assertTrue(marker.exists(), (result.stdout, result.stderr))
+            marker.unlink()
+
+            inherited = os.environ.get("PYTHONPATH", "")
+            for pythonpath in (None, ":" + inherited, inherited + ":"):
+                with self.subTest(pythonpath=pythonpath):
+                    result = run(CONVERTER_BOOTSTRAP, pythonpath)
+                    self.assertFalse(marker.exists(), "the working directory's converter ran")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("usage: ants_seg_to_nidm", result.stdout)
+
+        # A working directory removed after the app started: os.getcwd()
+        # raises in the converter's interpreter, which must still start.
+        with tempfile.TemporaryDirectory() as parent:
+            gone = Path(parent) / "gone"
+            gone.mkdir()
+            result = subprocess.run(
+                ["sh", "-c", 'cd "$1" && rmdir "$1" && shift && exec "$@"', "sh", str(gone),
+                 sys.executable, "-c", CONVERTER_BOOTSTRAP, "-h"],
+                env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+                capture_output=True, text=True, timeout=300)
+            self.assertFalse(gone.exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("usage: ants_seg_to_nidm", result.stdout)
+
+    def _parse_with_checked_out_converter(self, **kwargs):
+        """Build the converter argv exactly as nidm_conversion does, then hand
+        it to the argument parser of the converter checked out at
+        src/ants_seg_to_nidm. Return the converter's parsed namespace.
+
+        Not mocked on the converter side: an option the pinned converter does
+        not accept makes its own parser exit 2, which fails the test."""
+        import importlib
+        import argparse as _argparse
+
+        checkout = Path(project_root) / "src" / "ants_seg_to_nidm"
+        script = checkout / "ants_seg_to_nidm" / "ants_seg_to_nidm.py"
+        if not script.is_file():
+            if os.environ.get("CI"):
+                self.fail(f"{script} missing: CI must check out the submodule")
+            self.skipTest("ants_seg_to_nidm submodule not checked out")
+
+        derivatives_dir = self.create_derivatives_structure()
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            nidm_conversion(self.logger, derivatives_dir, "01",
+                            bids_session="01", method="fusion", **kwargs)
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[:3], [sys.executable, "-c", CONVERTER_BOOTSTRAP])
+
+        saved_path = list(sys.path)
+        saved_modules = {name: mod for name, mod in sys.modules.items()
+                         if name == "ants_seg_to_nidm" or name.startswith("ants_seg_to_nidm.")}
+        for name in saved_modules:
+            del sys.modules[name]
+        sys.path.insert(0, str(checkout))
+        try:
+            converter = importlib.import_module(CONVERTER_MODULE)
+            self.assertTrue(
+                Path(converter.__file__).resolve().is_relative_to(checkout.resolve()),
+                f"imported {converter.__file__}, not the checked-out converter")
+
+            parsed = {}
+            real_parse_args = _argparse.ArgumentParser.parse_args
+
+            def parse_args(parser_self, args=None, namespace=None):
+                parsed["args"] = real_parse_args(parser_self, args, namespace)
+                return parsed["args"]
+
+            class ArgumentsAccepted(Exception):
+                pass
+
+            def stop(*a, **kw):
+                # main() calls url_validator on -f right after its own checks
+                # of the parsed arguments; stop there, before any conversion.
+                raise ArgumentsAccepted()
+
+            with patch.object(_argparse.ArgumentParser, "parse_args", parse_args), \
+                 patch.object(converter, "url_validator", stop), \
+                 patch.object(sys, "argv", ["ants_seg_to_nidm.py", *cmd[3:]]):
+                try:
+                    converter.main()
+                except ArgumentsAccepted:
+                    pass
+                except SystemExit as exc:
+                    self.fail(f"the checked-out converter rejected the app's argv "
+                              f"(exit {exc.code}): {cmd[3:]}")
+                else:
+                    self.fail("converter main() returned without reaching its input checks")
+            return parsed["args"]
+        finally:
+            sys.path[:] = saved_path
+            for name in [n for n in sys.modules
+                         if n == "ants_seg_to_nidm" or n.startswith("ants_seg_to_nidm.")]:
+                del sys.modules[name]
+            sys.modules.update(saved_modules)
+
+    def test_checked_out_converter_accepts_the_argv_with_an_input_nidm(self):
+        t1w = Path(self.bids_dir) / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.nii.gz"
+        args = self._parse_with_checked_out_converter(nidm_input_file=self._input_nidm(),
+                                                      input_file=t1w)
+        self.assertEqual(args.acq_filename, ["sub-01_ses-01_T1w.nii.gz"])
+        self.assertTrue(args.forcenidm)
+        self.assertEqual(args.label_protocol, "neuromorphometrics")
+
+    def test_checked_out_converter_accepts_the_argv_without_an_input_nidm(self):
+        args = self._parse_with_checked_out_converter()
+        self.assertIsNone(args.nidm_file)
+        self.assertEqual(args.subjid, "sub-01")
+
+    def test_successful_conversion_logs_no_runtime_warning(self):
+        """Unmocked: the checked-out converter converts the example stats it
+        ships. Run as `python -m ants_seg_to_nidm.ants_seg_to_nidm`, runpy
+        warned on every run that the module was already in sys.modules (the
+        package __init__ imports it), and the app relayed that as two WARNING
+        lines in every subject's log."""
+        examples = Path(project_root) / "src" / "ants_seg_to_nidm" / "examples"
+        if not (examples / "antslabelstats.csv").is_file():
+            if os.environ.get("CI"):
+                self.fail(f"{examples} missing: CI must check out the submodule")
+            self.skipTest("ants_seg_to_nidm submodule not checked out")
+        subject_dir = Path(self.output_dir) / "sub-01"
+        (subject_dir / "anat").mkdir(parents=True)
+        (subject_dir / "stats").mkdir()
+        shutil.copy(examples / "antslabelstats.csv", subject_dir / "stats" / "sub-01_antslabelstats.csv")
+        # BVOL and LABELVOL only: an id the CDE table lacks would be added to
+        # the converter's tracked mapping_data.
+        (subject_dir / "stats" / "sub-01_antsbrainvols.csv").write_text("BVOL,LABELVOL\n1666780,1200000\n")
+        shutil.copy(examples / "antsBrainSegmentation.nii.gz",
+                    subject_dir / "anat" / "sub-01_space-orig_dseg.nii.gz")
+
+        with self.assertLogs(self.logger, level="INFO") as logs:
+            ok = nidm_conversion(self.logger, self.output_dir, "01", method="quick")
+        warnings = [r.getMessage() for r in logs.records if r.levelno >= logging.WARNING]
+        self.assertTrue(ok, warnings)
+        self.assertTrue((subject_dir / "nidm.ttl").is_file())
+        self.assertEqual([w for w in warnings if "RuntimeWarning" in w or "sys.modules" in w], [])
 
     def test_nidm_conversion_missing_files(self):
         """Test NIDM conversion with missing required files"""
@@ -505,6 +823,120 @@ class TestRun(unittest.TestCase):
 
                     MockSegmenter.return_value.run_subject.assert_not_called()
                     mock_nidm.assert_not_called()
+
+    # An input NIDM whose only subject agent has id `subject_id` (or none).
+    @staticmethod
+    def _input_nidm_text(subject_id):
+        text = (
+            "@prefix prov: <http://www.w3.org/ns/prov#> .\n"
+            "@prefix ndar: <https://ndar.nih.gov/api/datadictionary/v2/dataelement/> .\n"
+            "@prefix nidm: <http://purl.org/nidash/nidm#> .\n"
+            "<http://iri.nidash.org/project> a nidm:Project, prov:Activity .\n"
+        )
+        if subject_id is not None:
+            text += (f"<http://iri.nidash.org/person> a prov:Agent, prov:Person ;"
+                     f' ndar:src_subject_id "{subject_id}" .\n')
+        return text
+
+    def _run_with_input_nidm(self, level, session, subject_id, text=None):
+        """Run a level for sub-01 with an input NIDM naming `subject_id` (or
+        holding `text`); return (exit code, segmenter mock, nidm_conversion
+        mock, error log). Every log message is kept in self.last_messages."""
+        shutil.rmtree(Path(self.temp_dir) / "NIDM", ignore_errors=True)
+        args = self._unfetched_nidm_args(session)
+        nidm_in = Path(args.nidm_input_dir)
+        shutil.rmtree(nidm_in)
+        target = nidm_in / "sub-01" / (f"ses-{session}" if session else "") / "nidm.ttl"
+        target.parent.mkdir(parents=True)
+        target.write_text(text if text is not None else self._input_nidm_text(subject_id))
+        with patch('src.run.ANTsSegmentation') as MockSegmenter, \
+             patch('src.run.nidm_conversion', return_value=True) as mock_nidm, \
+             patch('src.run.resolve_anat_choice') as mock_choice, \
+             patch('src.run.save_processing_summary'), \
+             patch('bids.BIDSLayout') as MockBIDSLayout, \
+             self.assertLogs(self.logger, level="INFO") as logs:
+            mock_layout = MagicMock()
+            mock_layout.get_subjects.return_value = ['01']
+            mock_layout.get_sessions.return_value = ['01']
+            MockBIDSLayout.return_value = mock_layout
+            MockSegmenter.return_value.run_subject.return_value = True
+            mock_choice.return_value.chosen = None
+            code = level(args, self.logger)
+        self.last_messages = [r.getMessage() for r in logs.records]
+        errors = [r.getMessage() for r in logs.records if r.levelno >= logging.ERROR]
+        return code, MockSegmenter.return_value, mock_nidm, errors
+
+    @staticmethod
+    def _two_person_nidm_text(id_a, id_b):
+        """Two person nodes matching sub-01; only person-b owns an anatomical
+        MRI acquisition."""
+        return (
+            "@prefix prov: <http://www.w3.org/ns/prov#> .\n"
+            "@prefix ndar: <https://ndar.nih.gov/api/datadictionary/v2/dataelement/> .\n"
+            "@prefix nidm: <http://purl.org/nidash/nidm#> .\n"
+            "<http://iri.nidash.org/project> a nidm:Project, prov:Activity .\n"
+            f'<http://iri.nidash.org/person-a> a prov:Agent, prov:Person ; ndar:src_subject_id "{id_a}" .\n'
+            f'<http://iri.nidash.org/person-b> a prov:Agent, prov:Person ; ndar:src_subject_id "{id_b}" .\n'
+            "<http://iri.nidash.org/acq> a nidm:AcquisitionObject ;\n"
+            "    nidm:hadAcquisitionModality nidm:MagneticResonanceImaging ;\n"
+            "    nidm:hadImageUsageType nidm:Anatomical ;\n"
+            "    prov:wasGeneratedBy <http://iri.nidash.org/acq-activity> .\n"
+            "<http://iri.nidash.org/acq-activity> a prov:Activity ;\n"
+            "    prov:qualifiedAssociation [ a prov:Association ;"
+            " prov:agent <http://iri.nidash.org/person-b> ] .\n"
+        )
+
+    def test_input_check_logs_the_node_it_chose_among_duplicates(self):
+        """Two nodes store the subject's id and one owns the scan: the check
+        passes and the log names the node the stats will go to."""
+        for level, session in ((process_participant, None), (process_session, "01")):
+            with self.subTest(level=level.__name__):
+                code, segmenter, mock_nidm, errors = self._run_with_input_nidm(
+                    level, session, None, text=self._two_person_nidm_text("01", "01"))
+                self.assertEqual(code, 0, errors)
+                segmenter.run_subject.assert_called_once()
+                chosen = [m for m in self.last_messages if m.startswith("NIDM input check: ")]
+                self.assertEqual(len(chosen), 1, self.last_messages)
+                self.assertIn("Subject ID sub-01 matches 2 agents in the input NIDM", chosen[0])
+                self.assertIn("using http://iri.nidash.org/person-b, the only one that owns "
+                              "an anatomical MRI acquisition", chosen[0])
+
+    def test_input_nidm_with_differing_stored_ids_fails_before_segmentation(self):
+        """Two nodes match sub-01 only after normalisation ("01" and "sub-01");
+        they may be different people, so the job fails even though exactly one
+        owns the scan."""
+        code, segmenter, mock_nidm, errors = self._run_with_input_nidm(
+            process_participant, None, None, text=self._two_person_nidm_text("01", "sub-01"))
+        self.assertEqual(code, 1)
+        segmenter.run_subject.assert_not_called()
+        mock_nidm.assert_not_called()
+        self.assertTrue(any("their stored subject IDs differ (01, sub-01)" in e
+                            for e in errors), errors)
+
+    def test_input_nidm_without_the_subject_fails_before_segmentation(self):
+        """The converter would refuse an input NIDM that holds other subjects
+        but not this one; the app runs the converter's own lookup on it
+        before segmenting, so the job fails in seconds, with its message."""
+        for level, session in ((process_participant, None), (process_session, "01")):
+            with self.subTest(level=level.__name__):
+                code, segmenter, mock_nidm, errors = self._run_with_input_nidm(
+                    level, session, "02")
+                self.assertEqual(code, 1)
+                segmenter.run_subject.assert_not_called()
+                mock_nidm.assert_not_called()
+                self.assertTrue(any(
+                    "Subject ID sub-01 was not found in the input NIDM, which has "
+                    "subject IDs: 02" in e for e in errors), errors)
+
+    def test_input_nidm_with_the_subject_proceeds_to_segmentation(self):
+        for level, session in ((process_participant, None), (process_session, "01")):
+            for subject_id in ("1", "sub-01", None):  # None: no subjects, --forcenidm adds one
+                with self.subTest(level=level.__name__, subject_id=subject_id):
+                    code, segmenter, mock_nidm, errors = self._run_with_input_nidm(
+                        level, session, subject_id)
+                    self.assertEqual(code, 0, errors)
+                    segmenter.run_subject.assert_called_once()
+                    mock_nidm.assert_called_once()
 
     def test_process_participant_subject_not_found(self):
         """A participant label absent from the BIDS layout must fail fast,
