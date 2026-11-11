@@ -304,10 +304,12 @@ MRI acquisition, or several matching nodes that store the id differently
 input with no subjects at all is not an error; the
 subject is added to it.
 
-A `--nidm-input-dir` given on the command line must be an existing directory;
-otherwise the app exits with a usage error before reading any image. When the
-flag is left out, a missing `<bids_dir>/../NIDM` is not an error: the app
-writes a new `nidm.ttl`.
+A `--nidm-input-dir` given on the command line must be an existing directory
+the app can search; otherwise the app exits with a usage error before reading
+any image. Inside a container that means the directory must be mounted:
+`run_container.sh` binds it read-only for you, and a hand-written `apptainer
+run` or `docker run` needs its own `-B`/`-v`. When the flag is left out, a
+missing `<bids_dir>/../NIDM` is not an error: the app writes a new `nidm.ttl`.
 
 ### Command-line Arguments
 

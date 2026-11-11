@@ -20,8 +20,8 @@
 #   ./run_container.sh ants-nidm_bidsapp.sif  /data/bids /data/derivatives/ants-nidm 01
 #   ./run_container.sh ants-nidm_bidsapp:latest /data/bids /data/derivatives/ants-nidm 01 --num-threads 8 --verbose
 #
-# Anything after the participant label is passed to the app unchanged
-# (e.g. --session-label, --nidm-input-dir, --method quick, --num-threads N).
+# Anything after the participant label is passed to the app (e.g.
+# --session-label, --method quick); --nidm-input-dir is also mounted read-only.
 
 set -euo pipefail
 
@@ -49,6 +49,30 @@ case " $* " in
     *) THREAD_ARGS=(--num-threads 4) ;;
 esac
 
+# An explicit --nidm-input-dir is mounted read-only at its absolute host
+# path, since the app rejects a directory it cannot see. A value that is not
+# a directory here is passed on unchanged, and the app reports it.
+APP_ARGS=()
+NIDM_DIR=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --nidm-input-dir)
+            if [ "$#" -lt 2 ]; then
+                APP_ARGS+=("$1"); shift; continue
+            fi
+            nidm_value="$2"; shift 2 ;;
+        --nidm-input-dir=*)
+            nidm_value="${1#--nidm-input-dir=}"; shift ;;
+        *)
+            APP_ARGS+=("$1"); shift; continue ;;
+    esac
+    if [ -n "$nidm_value" ] && nidm_abs="$(cd "$nidm_value" 2>/dev/null && pwd)"; then
+        nidm_value="$nidm_abs"
+        NIDM_DIR="$nidm_abs"
+    fi
+    APP_ARGS+=(--nidm-input-dir "$nidm_value")
+done
+
 if [ -f "$IMAGE" ]; then
     # Apptainer / Singularity image file
     RUNNER=""
@@ -60,20 +84,25 @@ if [ -f "$IMAGE" ]; then
     fi
     # FireANTs registration needs the GPU visible inside the container.
     APPTAINER_ARGS=(run --userns --no-home --nv)
+    NIDM_BIND=()
+    [ -n "$NIDM_DIR" ] && NIDM_BIND=(-B "$NIDM_DIR":"$NIDM_DIR":ro)
     exec "$RUNNER" "${APPTAINER_ARGS[@]}" \
         -B "$BIDS_DIR":"$BIDS_DIR":ro \
         -B "$OUTPUT_DIR":"$OUTPUT_DIR" \
         -B "$WORK_DIR":/work \
+        ${NIDM_BIND[@]+"${NIDM_BIND[@]}"} \
         "$IMAGE" \
         "$BIDS_DIR" "$OUTPUT_DIR" participant \
         --participant-label "$PARTICIPANT" \
-        "${THREAD_ARGS[@]}" "$@"
+        ${THREAD_ARGS[@]+"${THREAD_ARGS[@]}"} ${APP_ARGS[@]+"${APP_ARGS[@]}"}
 else
     # Docker image name
     if ! command -v docker >/dev/null 2>&1; then
         echo "ERROR: '$IMAGE' is not a file and docker is not installed." >&2
         exit 1
     fi
+    NIDM_BIND=()
+    [ -n "$NIDM_DIR" ] && NIDM_BIND=(-v "$NIDM_DIR":"$NIDM_DIR":ro)
     # FireANTs registration needs the GPU visible inside the container.
     exec docker run --rm \
         --gpus all \
@@ -81,8 +110,9 @@ else
         -v "$BIDS_DIR":"$BIDS_DIR":ro \
         -v "$OUTPUT_DIR":"$OUTPUT_DIR" \
         -v "$WORK_DIR":/work \
+        ${NIDM_BIND[@]+"${NIDM_BIND[@]}"} \
         "$IMAGE" \
         "$BIDS_DIR" "$OUTPUT_DIR" participant \
         --participant-label "$PARTICIPANT" \
-        "${THREAD_ARGS[@]}" "$@"
+        ${THREAD_ARGS[@]+"${THREAD_ARGS[@]}"} ${APP_ARGS[@]+"${APP_ARGS[@]}"}
 fi
