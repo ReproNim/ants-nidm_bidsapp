@@ -34,13 +34,14 @@ class TestRunContainer(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_wrapper(self, image, *extra):
+    def run_wrapper(self, image, *extra, env_extra=None):
         # lmod's BASH_ENV and exported functions would redefine commands in
         # the non-interactive bash; keep only what the wrapper needs.
         env = {k: v for k, v in os.environ.items()
-               if k != "BASH_ENV" and not k.startswith("BASH_FUNC_")}
+               if k not in ("BASH_ENV", "CDPATH") and not k.startswith("BASH_FUNC_")}
         env["PATH"] = f"{self.bin}:/usr/bin:/bin"
         env["TMPDIR"] = str(self.tmp)
+        env.update(env_extra or {})
         proc = subprocess.run(
             ["bash", str(SCRIPT), str(image), str(self.bids), str(self.out), "01", *extra],
             cwd=self.tmp, env=env, capture_output=True, text=True,
@@ -52,7 +53,9 @@ class TestRunContainer(unittest.TestCase):
         """The app rejects a --nidm-input-dir it cannot see, so the wrapper
         has to mount it; a relative path is made absolute first."""
         nidm = str(self.nidm)
-        for flag in (["--nidm-input-dir", "nidm"], ["--nidm-input-dir=nidm"]):
+        # argparse accepts unambiguous prefixes, so the wrapper must too.
+        for flag in (["--nidm-input-dir", "nidm"], ["--nidm-input-dir=nidm"],
+                     ["--nidm", "nidm"], ["--nidm-input=nidm"]):
             with self.subTest(flag=flag):
                 argv = self.run_wrapper(self.sif, "--verbose", *flag, "--method", "quick")
                 i = argv.index(f"{nidm}:{nidm}:ro")
@@ -62,6 +65,24 @@ class TestRunContainer(unittest.TestCase):
                 self.assertEqual(app[app.index("--nidm-input-dir") + 1], nidm)
                 self.assertIn("--verbose", app)
                 self.assertEqual(app[app.index("--method") + 1], "quick")
+
+    def test_an_exported_cdpath_does_not_redirect_the_nidm_dir(self):
+        """cd follows CDPATH for a relative name and prints what it chose,
+        which would bind another directory under a two-line path."""
+        elsewhere = self.tmp / "elsewhere"
+        (elsewhere / "nidm").mkdir(parents=True)
+        nidm = str(self.nidm)
+        argv = self.run_wrapper(self.sif, "--nidm-input-dir", "nidm",
+                                env_extra={"CDPATH": str(elsewhere)})
+        self.assertIn(f"{nidm}:{nidm}:ro", argv)
+        app = argv[argv.index(str(self.sif)) + 1:]
+        self.assertEqual(app[app.index("--nidm-input-dir") + 1], nidm)
+
+    def test_a_flag_that_only_starts_like_it_is_passed_through(self):
+        argv = self.run_wrapper(self.sif, "--nidm-input-dirs", "nidm")
+        self.assertFalse([a for a in argv if a.endswith(":ro") and a.startswith(str(self.nidm))])
+        app = argv[argv.index(str(self.sif)) + 1:]
+        self.assertEqual(app[app.index("--nidm-input-dirs") + 1], "nidm")
 
     def test_docker_mounts_the_nidm_dir_read_only(self):
         nidm = str(self.nidm)

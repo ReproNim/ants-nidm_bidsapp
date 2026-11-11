@@ -283,11 +283,18 @@ restructure the input or open an issue.
 
 ### NIDM input
 
-`--nidm-input-dir` is searched most specific first:
+`--nidm-input-dir` is searched most specific first. A session run first tries:
 
-1. `<dir>/sub-<id>/[ses-<ses>/]nidm.ttl`
-2. `<dir>/sub-<id>/[ses-<ses>/]sub-<id>[_ses-<ses>].ttl`
-3. `<dir>/sub-<id>[_ses-<ses>].ttl`
+1. `<dir>/sub-<id>/ses-<ses>/nidm.ttl`
+2. `<dir>/sub-<id>_ses-<ses>/nidm.ttl`
+3. `<dir>/sub-<id>/ses-<ses>/sub-<id>_ses-<ses>.ttl`
+4. `<dir>/sub-<id>_ses-<ses>.ttl`
+
+Every run then tries:
+
+1. `<dir>/sub-<id>/nidm.ttl`
+2. `<dir>/sub-<id>/sub-<id>.ttl`
+3. `<dir>/sub-<id>.ttl`
 4. `<dir>/nidm.ttl`
 
 The lookup runs before segmentation. If the directory exists but none of
@@ -307,8 +314,10 @@ subject is added to it.
 A `--nidm-input-dir` given on the command line must be an existing directory
 the app can search; otherwise the app exits with a usage error before reading
 any image. Inside a container that means the directory must be mounted:
-`run_container.sh` binds it read-only for you, and a hand-written `apptainer
-run` or `docker run` needs its own `-B`/`-v`. When the flag is left out, a
+`run_container.sh` binds it read-only for you. A hand-written `docker run`
+needs its own `-v`, and so does an `apptainer run` unless the directory is
+under a path Apptainer mounts by default (`$HOME`, the current directory and
+`/tmp`, when neither `--no-home` nor `--contain` is given) or a site bind. When the flag is left out, a
 missing `<bids_dir>/../NIDM` is not an error: the app writes a new `nidm.ttl`.
 
 ### Command-line Arguments

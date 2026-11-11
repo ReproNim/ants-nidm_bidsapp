@@ -395,7 +395,7 @@ def parse_arguments():
                         action='store_true')
     parser.add_argument('--ants-input', help='Path to existing ANTs segmentation derivatives. Required if --skip-ants is set.',
                         type=str, default=None)
-    parser.add_argument('--nidm-input-dir', help='Directory containing existing NIDM files. Searched in this order: sub-{id}/[ses-{session}/]nidm.ttl, sub-{id}/[ses-{session}/]sub-{id}[_ses-{session}].ttl, sub-{id}[_ses-{session}].ttl, then a dataset-level nidm.ttl. If given, it must be an existing directory with search permission. Defaults to <bids_dir>/../NIDM for BABS workflows (which may be absent).',
+    parser.add_argument('--nidm-input-dir', help='Directory containing existing NIDM files. A session run first tries sub-{id}/ses-{session}/nidm.ttl, sub-{id}_ses-{session}/nidm.ttl, sub-{id}/ses-{session}/sub-{id}_ses-{session}.ttl and sub-{id}_ses-{session}.ttl; every run then tries sub-{id}/nidm.ttl, sub-{id}/sub-{id}.ttl, sub-{id}.ttl and a dataset-level nidm.ttl. If given, it must be an existing directory with search permission. Defaults to <bids_dir>/../NIDM for BABS workflows (which may be absent).',
                         type=str, default=None)
     
     parser.add_argument('--num-threads', help='Number of threads to use for processing [default: 1]',

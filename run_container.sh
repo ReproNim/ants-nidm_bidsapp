@@ -24,6 +24,9 @@
 # --session-label, --method quick); --nidm-input-dir is also mounted read-only.
 
 set -euo pipefail
+# An exported CDPATH would make the `cd` calls below pick another directory
+# and print it.
+unset CDPATH
 
 if [ "$#" -lt 4 ]; then
     grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,24p'
@@ -52,20 +55,26 @@ esac
 # An explicit --nidm-input-dir is mounted read-only at its absolute host
 # path, since the app rejects a directory it cannot see. A value that is not
 # a directory here is passed on unchanged, and the app reports it.
+# argparse also accepts an unambiguous prefix such as --nidm.
+is_nidm_flag() {
+    case "$1" in --nidm*) ;; *) return 1 ;; esac
+    case "--nidm-input-dir" in "$1"*) return 0 ;; esac
+    return 1
+}
 APP_ARGS=()
 NIDM_DIR=""
 while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --nidm-input-dir)
-            if [ "$#" -lt 2 ]; then
-                APP_ARGS+=("$1"); shift; continue
-            fi
-            nidm_value="$2"; shift 2 ;;
-        --nidm-input-dir=*)
-            nidm_value="${1#--nidm-input-dir=}"; shift ;;
-        *)
-            APP_ARGS+=("$1"); shift; continue ;;
-    esac
+    key="${1%%=*}"
+    if ! is_nidm_flag "$key"; then
+        APP_ARGS+=("$1"); shift; continue
+    fi
+    if [ "$key" != "$1" ]; then
+        nidm_value="${1#*=}"; shift
+    elif [ "$#" -ge 2 ]; then
+        nidm_value="$2"; shift 2
+    else
+        APP_ARGS+=("$1"); shift; continue
+    fi
     if [ -n "$nidm_value" ] && nidm_abs="$(cd "$nidm_value" 2>/dev/null && pwd)"; then
         nidm_value="$nidm_abs"
         NIDM_DIR="$nidm_abs"
