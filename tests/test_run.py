@@ -1414,9 +1414,9 @@ class TestRun(unittest.TestCase):
 
     def test_missing_explicit_nidm_input_dir_is_rejected(self):
         """An explicit --nidm-input-dir that is not a directory is a typo or a
-        missing mount; it used to warn and build NIDM without the input. An
-        existing (even empty) directory is accepted, and the default stays
-        unchecked because BABS relies on it being optional."""
+        missing mount; it used to warn and build NIDM without the input. So is
+        an empty directory. The default stays unchecked because BABS relies
+        on it being optional."""
         import sys
         from unittest.mock import patch
 
@@ -1471,8 +1471,15 @@ class TestRun(unittest.TestCase):
             finally:
                 search_only.chmod(0o700)
 
+        # No entries at all: an uninstalled datalad subdataset or an empty
+        # mount, which would build every subject's NIDM without its input.
         empty = Path(self.temp_dir) / "empty_nidm"
         empty.mkdir()
+        message = rejection(str(empty))
+        self.assertIn("is empty", message)
+        self.assertIn("datalad get -n", message)
+        # Any entry counts, even one the lookup would not use for this subject.
+        (empty / "sub-02").mkdir()
         with patch.object(sys, "argv", base + ["--nidm-input-dir", str(empty)]):
             self.assertEqual(parse_arguments().nidm_input_dir, str(empty))
         with patch.object(sys, "argv", base):

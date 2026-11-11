@@ -395,7 +395,7 @@ def parse_arguments():
                         action='store_true')
     parser.add_argument('--ants-input', help='Path to existing ANTs segmentation derivatives. Required if --skip-ants is set.',
                         type=str, default=None)
-    parser.add_argument('--nidm-input-dir', help='Directory containing existing NIDM files. A session run first tries sub-{id}/ses-{session}/nidm.ttl, sub-{id}_ses-{session}/nidm.ttl, sub-{id}/ses-{session}/sub-{id}_ses-{session}.ttl and sub-{id}_ses-{session}.ttl; every run then tries sub-{id}/nidm.ttl, sub-{id}/sub-{id}.ttl, sub-{id}.ttl and a dataset-level nidm.ttl. If given, it must be an existing directory with search permission. Defaults to <bids_dir>/../NIDM for BABS workflows (which may be absent).',
+    parser.add_argument('--nidm-input-dir', help='Directory containing existing NIDM files. A session run first tries sub-{id}/ses-{session}/nidm.ttl, sub-{id}_ses-{session}/nidm.ttl, sub-{id}/ses-{session}/sub-{id}_ses-{session}.ttl and sub-{id}_ses-{session}.ttl; every run then tries sub-{id}/nidm.ttl, sub-{id}/sub-{id}.ttl, sub-{id}.ttl and a dataset-level nidm.ttl. If given, it must be an existing, non-empty directory with search permission. Defaults to <bids_dir>/../NIDM for BABS workflows (which may be absent).',
                         type=str, default=None)
     
     parser.add_argument('--num-threads', help='Number of threads to use for processing [default: 1]',
@@ -464,6 +464,20 @@ def parse_arguments():
                          "(when running in a container, check that it is mounted)")
         if not os.access(nidm_dir, os.X_OK):
             parser.error(f"--nidm-input-dir {value!r} is not searchable")
+        # A directory with no entries at all holds no input for any subject:
+        # usually an uninstalled datalad subdataset or an empty mount. Without
+        # read permission it cannot be listed; the lookup does not need to.
+        try:
+            with os.scandir(nidm_dir) as entries:
+                is_empty = next(entries, None) is None
+        except PermissionError:
+            is_empty = False
+        except OSError as e:
+            parser.error(f"--nidm-input-dir {value!r} cannot be accessed: {e.strerror}")
+        if is_empty:
+            parser.error(f"--nidm-input-dir {value!r} is empty (if it is a datalad "
+                         "subdataset, install it with 'datalad get -n'; when running "
+                         "in a container, check that the right directory is mounted)")
 
     return args
 

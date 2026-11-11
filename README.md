@@ -311,9 +311,10 @@ MRI acquisition, or several matching nodes that store the id differently
 input with no subjects at all is not an error; the
 subject is added to it.
 
-A `--nidm-input-dir` given on the command line must be an existing directory
-the app can search; otherwise the app exits with a usage error before reading
-any image. Inside a container that means the directory must be mounted:
+A `--nidm-input-dir` given on the command line must be an existing, non-empty
+directory the app can search; otherwise the app exits with a usage error before
+reading any image. An empty directory is usually a datalad subdataset that was
+never installed (`datalad get -n <path>` installs it) or an empty mount. Inside a container that means the directory must be mounted:
 `run_container.sh` binds it read-only for you. A hand-written `docker run`
 needs its own `-v`, and so does an `apptainer run` unless the directory is
 under a path Apptainer mounts by default (`$HOME`, the current directory and
