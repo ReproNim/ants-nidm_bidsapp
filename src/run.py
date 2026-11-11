@@ -395,7 +395,7 @@ def parse_arguments():
                         action='store_true')
     parser.add_argument('--ants-input', help='Path to existing ANTs segmentation derivatives. Required if --skip-ants is set.',
                         type=str, default=None)
-    parser.add_argument('--nidm-input-dir', help='Directory containing existing NIDM files. Files will be searched in standard BIDS structure: sub-{id}/[ses-{session}/]sub-{id}[_ses-{session}].ttl or fallback to nidm.ttl. If given, it must be an existing, readable directory. Defaults to <bids_dir>/../NIDM for BABS workflows (which may be absent).',
+    parser.add_argument('--nidm-input-dir', help='Directory containing existing NIDM files. Searched in this order: sub-{id}/[ses-{session}/]nidm.ttl, sub-{id}/[ses-{session}/]sub-{id}[_ses-{session}].ttl, sub-{id}[_ses-{session}].ttl, then a dataset-level nidm.ttl. If given, it must be an existing directory with search permission. Defaults to <bids_dir>/../NIDM for BABS workflows (which may be absent).',
                         type=str, default=None)
     
     parser.add_argument('--num-threads', help='Number of threads to use for processing [default: 1]',
@@ -449,12 +449,21 @@ def parse_arguments():
     # what BABS relies on) may still be absent.
     # An empty value (an unset variable in a wrapper) would otherwise mean
     # the current directory, which can hold a previous run's output.
+    # The lookup only stats fixed candidate paths and never lists the
+    # directory, so search permission is all it needs.
     if args.nidm_input_dir is not None:
-        nidm_dir = Path(args.nidm_input_dir)
-        if not args.nidm_input_dir.strip() or not nidm_dir.is_dir():
-            parser.error(f"--nidm-input-dir {args.nidm_input_dir!r} is not a directory")
-        if not os.access(nidm_dir, os.R_OK | os.X_OK):
-            parser.error(f"--nidm-input-dir {args.nidm_input_dir!r} is not readable")
+        value = args.nidm_input_dir
+        nidm_dir = Path(value)
+        try:
+            is_dir = bool(value.strip()) and nidm_dir.is_dir()
+        except OSError as e:
+            # e.g. a parent directory without search permission
+            parser.error(f"--nidm-input-dir {value!r} cannot be accessed: {e.strerror}")
+        if not is_dir:
+            parser.error(f"--nidm-input-dir {value!r} is not a directory "
+                         "(when running in a container, check that it is mounted)")
+        if not os.access(nidm_dir, os.X_OK):
+            parser.error(f"--nidm-input-dir {value!r} is not searchable")
 
     return args
 

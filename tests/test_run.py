@@ -1422,28 +1422,54 @@ class TestRun(unittest.TestCase):
 
         from src.run import parse_arguments
 
+        import contextlib
+        import io
+
         base = ["ants-nidm", "/bids", "/out", "participant"]
+
+        def rejection(value):
+            err = io.StringIO()
+            with patch.object(sys, "argv", base + ["--nidm-input-dir", value]), \
+                 contextlib.redirect_stderr(err), \
+                 self.assertRaises(SystemExit):
+                parse_arguments()
+            return err.getvalue()
+
         missing = Path(self.temp_dir) / "no_such_nidm"
+        # Executable, so only the directory check can reject it.
         a_file = Path(self.temp_dir) / "nidm.ttl"
         a_file.write_text("")
+        a_file.chmod(0o755)
         # "" is what an unset variable in a wrapper passes; it must not
         # silently mean the current directory.
         for bad in (str(missing), str(a_file), ""):
-            with self.subTest(path=bad), \
-                 patch.object(sys, "argv", base + ["--nidm-input-dir", bad]), \
-                 self.assertRaises(SystemExit):
-                parse_arguments()
+            with self.subTest(path=bad):
+                self.assertIn("is not a directory", rejection(bad))
 
-        # Unreadable: a usage error now, not a PermissionError mid-run.
         if os.geteuid() != 0:
+            # Without search permission: a usage error now, not a
+            # PermissionError mid-run.
             locked = Path(self.temp_dir) / "locked_nidm"
             locked.mkdir(mode=0)
+            # Under a parent without search permission, is_dir() itself
+            # raises; that is a usage error too, not a traceback.
+            hidden = locked / "nidm"
             try:
-                with patch.object(sys, "argv", base + ["--nidm-input-dir", str(locked)]), \
-                     self.assertRaises(SystemExit):
-                    parse_arguments()
+                self.assertIn("is not searchable", rejection(str(locked)))
+                self.assertIn("cannot be accessed", rejection(str(hidden)))
             finally:
                 locked.chmod(0o700)
+
+            # The lookup never lists the directory, so search permission
+            # alone is enough.
+            search_only = Path(self.temp_dir) / "search_only_nidm"
+            search_only.mkdir()
+            search_only.chmod(0o100)
+            try:
+                with patch.object(sys, "argv", base + ["--nidm-input-dir", str(search_only)]):
+                    self.assertEqual(parse_arguments().nidm_input_dir, str(search_only))
+            finally:
+                search_only.chmod(0o700)
 
         empty = Path(self.temp_dir) / "empty_nidm"
         empty.mkdir()
