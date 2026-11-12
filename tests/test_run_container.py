@@ -172,16 +172,25 @@ class TestRunContainer(unittest.TestCase):
         self.out.mkdir()
         inside = self.out / "sub-01"
         inside.mkdir()
+        # Overlaps only by its resolved path...
         alias = self.tmp / "alias"
         alias.symlink_to(inside)
+        # ...and only by its given path: the mount at out/sub-02 would still
+        # cover that part of the output.
+        (self.tmp / "elsewhere").mkdir()
+        linked = self.out / "sub-02"
+        linked.symlink_to(self.tmp / "elsewhere")
+        # TMPDIR that does not exist: making scratch would fail with exit 1,
+        # so exit 2 shows the check runs first.
+        no_tmp = {"TMPDIR": str(self.tmp / "no_such_tmp")}
         for image in (self.sif, "ants-nidm_bidsapp:latest"):
-            for nidm in (self.out, inside, alias):
+            for nidm in (self.out, inside, alias, linked):
                 with self.subTest(image=str(image), nidm=str(nidm)):
-                    proc = self.run_wrapper(image, "--nidm-input-dir", str(nidm), expect=2)
+                    proc = self.run_wrapper(image, "--nidm-input-dir", str(nidm),
+                                            env_extra=no_tmp, expect=2)
                     self.assertIn("is the output directory or inside it", proc.stderr)
-                    # Refused before the runner starts or scratch is made.
+                    # The fake runner prints its arguments: it never started.
                     self.assertEqual(proc.stdout, "")
-                    self.assertFalse(list(self.tmp.glob("ants-nidm-work.*")))
 
     def test_a_nidm_dir_outside_the_output_dir_is_mounted(self):
         """The overlap check compares whole path components: out-nidm next to
@@ -213,6 +222,21 @@ class TestRunContainer(unittest.TestCase):
                                       if m.startswith(f"{bids}/")])
                     app = argv[argv.index(str(image)) + 1:]
                     self.assertEqual(app[app.index("--nidm-input-dir") + 1], nidm)
+
+    def test_a_nidm_dir_reached_out_of_the_bids_dir_is_mounted(self):
+        """A sibling whose name starts like the BIDS dir is not inside it, and
+        neither is <bids>/NIDM when it is a symlink to a directory elsewhere:
+        the BIDS mount would show a dangling link."""
+        sibling = self.tmp / "bids-nidm"
+        sibling.mkdir()
+        elsewhere = self.tmp / "elsewhere" / "nidm"
+        elsewhere.mkdir(parents=True)
+        linked = self.bids / "NIDM"
+        linked.symlink_to(elsewhere)
+        for nidm in (sibling, linked):
+            with self.subTest(nidm=str(nidm)):
+                argv = self.run_wrapper(self.sif, "--nidm-input-dir", str(nidm))
+                self.assertIn(f"{nidm}:{nidm}:ro", self.mounts(argv, "-B"))
 
     def test_without_the_flag_only_the_standard_binds_are_added(self):
         argv = self.run_wrapper(self.sif, "--num-threads", "8")

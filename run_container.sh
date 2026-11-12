@@ -108,9 +108,14 @@ if [ -n "$NIDM_DIR" ] && [ -d "$OUTPUT_DIR" ]; then
         exit 2
     fi
 fi
-# A directory inside <bids_dir> is already visible through the BIDS mount.
+# A directory inside <bids_dir> is already visible through the BIDS mount,
+# unless a symlink on the way leads out of it: then the resolved path is not
+# the BIDS dir's resolved path plus the same suffix, and it is mounted.
 NIDM_MOUNT="$NIDM_DIR"
-case "$NIDM_DIR/" in "$BIDS_DIR/"*) NIDM_MOUNT="" ;; esac
+case "$NIDM_DIR/" in "$BIDS_DIR/"*)
+    [ "$(cd "$NIDM_DIR" && pwd -P)" = "$(cd "$BIDS_DIR" && pwd -P)${NIDM_DIR#"$BIDS_DIR"}" ] \
+        && NIDM_MOUNT="" ;;
+esac
 
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
