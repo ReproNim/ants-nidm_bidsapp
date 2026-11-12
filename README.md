@@ -156,7 +156,9 @@ wrapper — it sets up the binds and writable scratch the image expects:
 ```
 
 The wrapper works with an Apptainer/Singularity `.sif` file or a Docker image
-name, and passes any extra arguments straight to the app:
+name, and passes any extra arguments to the app. It mounts an explicit
+`--nidm-input-dir` read-only (refusing one that is the output directory or
+inside it) and passes its absolute path on:
 
 ```bash
 ./run_container.sh ants-nidm_bidsapp.sif /path/to/bids /path/to/output 01 \
@@ -316,7 +318,9 @@ directory the app can search; otherwise the app exits with a usage error before
 reading any image. An empty directory is usually a datalad subdataset that was
 never installed (`datalad get -n <path>` installs it, and `datalad get <path>`
 then fetches the NIDM files, which the app also needs) or an empty mount. Inside a container that means the directory must be mounted:
-`run_container.sh` binds it read-only for you. A hand-written `docker run`
+`run_container.sh` binds it read-only for you (unless it is inside
+`<bids_dir>`, which is mounted already); it refuses a directory that is the
+output directory or inside it. A hand-written `docker run`
 needs its own `-v`, and so does an `apptainer run` unless the directory is
 under a path Apptainer mounts by default (`$HOME`, the current directory and
 `/tmp`, when neither `--no-home` nor `--contain` is given) or a site bind. When the flag is left out, a

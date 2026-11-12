@@ -52,12 +52,6 @@ OUTPUT_DIR="$3"
 PARTICIPANT="$4"
 shift 4
 
-mkdir -p "$OUTPUT_DIR"
-OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
-
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ants-nidm-work.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
-
 # Default to 4 threads unless the caller passes their own --num-threads
 THREAD_ARGS=()
 case " $* " in
@@ -68,9 +62,10 @@ esac
 # An explicit --nidm-input-dir is mounted read-only at its absolute host
 # path, since the app rejects a directory it cannot see. A value that is not
 # a directory here is passed on unchanged, and the app reports it.
-# argparse also accepts an unambiguous prefix such as --nidm.
+# argparse also accepts an unambiguous prefix such as --ni; --n is ambiguous
+# with --num-threads, so argparse rejects it.
 is_nidm_flag() {
-    case "$1" in --nidm*) ;; *) return 1 ;; esac
+    [ "${#1}" -ge 4 ] || return 1
     case "--nidm-input-dir" in "$1"*) return 0 ;; esac
     return 1
 }
@@ -95,6 +90,34 @@ while [ "$#" -gt 0 ]; do
     APP_ARGS+=(--nidm-input-dir "$nidm_value")
 done
 
+# The NIDM input must not be the output directory or lie inside it: its
+# read-only mount would cover the outputs, which are written there only after
+# the GPU work is done. Checked on both the given and the resolved paths, so a
+# symlinked alias is caught too. An output directory that does not exist yet
+# cannot contain an existing NIDM directory.
+if [ -n "$NIDM_DIR" ] && [ -d "$OUTPUT_DIR" ]; then
+    out_abs="$(cd "$OUTPUT_DIR" && pwd)"
+    out_phys="$(cd "$OUTPUT_DIR" && pwd -P)"
+    nidm_phys="$(cd "$NIDM_DIR" && pwd -P)"
+    case "$NIDM_DIR/" in "$out_abs/"*) nidm_in_output=1 ;; *) nidm_in_output="" ;; esac
+    case "$nidm_phys/" in "$out_phys/"*) nidm_in_output=1 ;; esac
+    if [ -n "$nidm_in_output" ]; then
+        echo "ERROR: --nidm-input-dir $NIDM_DIR is the output directory or inside it;" \
+             "its read-only mount would cover the outputs. Give the NIDM input" \
+             "from a directory outside $out_abs." >&2
+        exit 2
+    fi
+fi
+# A directory inside <bids_dir> is already visible through the BIDS mount.
+NIDM_MOUNT="$NIDM_DIR"
+case "$NIDM_DIR/" in "$BIDS_DIR/"*) NIDM_MOUNT="" ;; esac
+
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ants-nidm-work.XXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
 if [ -f "$IMAGE" ]; then
     # Apptainer / Singularity image file
     RUNNER=""
@@ -107,7 +130,7 @@ if [ -f "$IMAGE" ]; then
     # FireANTs registration needs the GPU visible inside the container.
     APPTAINER_ARGS=(run --userns --no-home --nv)
     NIDM_BIND=()
-    [ -n "$NIDM_DIR" ] && NIDM_BIND=(-B "$NIDM_DIR":"$NIDM_DIR":ro)
+    [ -n "$NIDM_MOUNT" ] && NIDM_BIND=(-B "$NIDM_MOUNT":"$NIDM_MOUNT":ro)
     exec "$RUNNER" "${APPTAINER_ARGS[@]}" \
         -B "$BIDS_DIR":"$BIDS_DIR":ro \
         -B "$OUTPUT_DIR":"$OUTPUT_DIR" \
@@ -124,7 +147,7 @@ else
         exit 1
     fi
     NIDM_BIND=()
-    [ -n "$NIDM_DIR" ] && NIDM_BIND=(-v "$NIDM_DIR":"$NIDM_DIR":ro)
+    [ -n "$NIDM_MOUNT" ] && NIDM_BIND=(-v "$NIDM_MOUNT":"$NIDM_MOUNT":ro)
     # FireANTs registration needs the GPU visible inside the container.
     exec docker run --rm \
         --gpus all \
