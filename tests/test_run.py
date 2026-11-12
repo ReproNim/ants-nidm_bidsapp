@@ -1495,11 +1495,17 @@ class TestRun(unittest.TestCase):
         a_file = Path(self.temp_dir) / "nidm.ttl"
         a_file.write_text("")
         a_file.chmod(0o755)
-        # "" is what an unset variable in a wrapper passes; it must not
-        # silently mean the current directory.
-        for bad in (str(missing), str(a_file), ""):
+        for bad in (str(missing), str(a_file)):
             with self.subTest(path=bad):
                 self.assertIn("is not a directory", rejection(bad))
+        # "" is what an unset variable in a wrapper passes; it must not
+        # silently mean the current directory, and the message names the
+        # cause rather than sending the user to check mounts.
+        for blank in ("", "   "):
+            with self.subTest(path=blank):
+                message = rejection(blank)
+                self.assertIn("--nidm-input-dir must not be empty", message)
+                self.assertNotIn("mounted", message)
 
         if os.geteuid() != 0:
             # Without search permission: a usage error now, not a

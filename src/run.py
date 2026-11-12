@@ -459,9 +459,11 @@ def parse_arguments():
     # directory, so search permission is all it needs.
     if args.nidm_input_dir is not None:
         value = args.nidm_input_dir
+        if not value.strip():
+            parser.error("--nidm-input-dir must not be empty")
         nidm_dir = Path(value)
         try:
-            is_dir = bool(value.strip()) and nidm_dir.is_dir()
+            is_dir = nidm_dir.is_dir()
         except OSError as e:
             # e.g. a parent directory without search permission
             parser.error(f"--nidm-input-dir {value!r} cannot be accessed: {e.strerror}")
