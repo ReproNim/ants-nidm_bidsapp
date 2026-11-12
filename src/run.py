@@ -432,7 +432,7 @@ def parse_arguments():
     args = parser.parse_args()
 
     # Validate arguments
-    # An empty positional is an unset variable in a wrapper script. Path("")
+    # An empty or blank positional is an unset variable in a wrapper script. Path("")
     # is the current directory, so the run would read the directory the job
     # started in as the dataset, or write its logs there.
     for name in ("bids_dir", "output_dir"):

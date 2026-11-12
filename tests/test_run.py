@@ -1444,15 +1444,20 @@ class TestRun(unittest.TestCase):
                 os.chdir(previous)
             return caught.exception.code, err.getvalue(), os.listdir(start)
 
+        # The other argument names a path inside the temp dir, so a build
+        # without the check writes there and nowhere else.
+        other_out = os.path.join(self.temp_dir, "given_out")
+        other_bids = os.path.join(self.temp_dir, "given_bids")
         for empty in ("", "   "):
             with self.subTest(bids_dir=empty):
-                code, message, left = run_main(empty, "/out")
+                code, message, left = run_main(empty, other_out)
                 self.assertEqual(code, 2)
                 # The usage line lists every argument, so check the sentence.
                 self.assertIn("bids_dir must not be empty", message)
                 self.assertEqual(left, [])
+                self.assertFalse(os.path.exists(other_out))
             with self.subTest(output_dir=empty):
-                code, message, left = run_main("/bids", empty)
+                code, message, left = run_main(other_bids, empty)
                 self.assertEqual(code, 2)
                 self.assertIn("output_dir must not be empty", message)
                 self.assertEqual(left, [])

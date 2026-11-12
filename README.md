@@ -329,8 +329,9 @@ missing `<bids_dir>/../NIDM` is not an error: the app writes a new `nidm.ttl`.
 - `output_dir`: Path where outputs will be stored
 - `analysis_level`: Level of the analysis (`participant` or `session`)
 
-An empty `bids_dir` or `output_dir` (an unset variable in a job script) is a
-usage error; it would otherwise mean the current directory.
+An empty or blank `bids_dir` or `output_dir` (an unset variable in a job script)
+is a usage error, in the app and in `run_container.sh`; an empty one would
+otherwise mean the current directory.
 
 **Participant/Session Selection:**
 - `--participant-label`, `--participant_label`: Label of the participant to analyze (with or without "sub-" prefix)

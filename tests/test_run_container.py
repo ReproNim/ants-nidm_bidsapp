@@ -49,6 +49,32 @@ class TestRunContainer(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout.splitlines()
 
+    def test_an_empty_bids_or_output_dir_is_rejected(self):
+        """`cd ""` succeeds and stays put, so an empty BIDS_DIR (an unset
+        variable) became the directory the wrapper was started in before
+        the app could reject it; a blank OUTPUT_DIR was created there."""
+        start = self.tmp / "start"
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("BASH_ENV", "CDPATH") and not k.startswith("BASH_FUNC_")}
+        env["PATH"] = f"{self.bin}:/usr/bin:/bin"
+        env["TMPDIR"] = str(self.tmp)
+        cases = [("bids_dir", empty, str(self.out)) for empty in ("", "   ")]
+        cases += [("output_dir", str(self.bids), empty) for empty in ("", "   ")]
+        for name, bids, out in cases:
+            with self.subTest(name=name, bids=bids, out=out):
+                shutil.rmtree(start, ignore_errors=True)
+                start.mkdir()
+                proc = subprocess.run(
+                    ["bash", str(SCRIPT), str(self.sif), bids, out, "01"],
+                    cwd=start, env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertIn(f"{name} must not be empty", proc.stderr)
+                # The fake runner prints its arguments: no output, no run.
+                self.assertEqual(proc.stdout, "")
+                self.assertEqual(os.listdir(start), [])
+                self.assertFalse(self.out.exists())
+
     def test_apptainer_mounts_the_nidm_dir_read_only(self):
         """The app rejects a --nidm-input-dir it cannot see, so the wrapper
         has to mount it; a relative path is made absolute first."""

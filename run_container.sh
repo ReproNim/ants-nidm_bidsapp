@@ -33,6 +33,19 @@ if [ "$#" -lt 4 ]; then
     exit 1
 fi
 
+# An empty or blank directory argument is an unset variable in the caller.
+# `cd ""` succeeds and stays put, so an empty <bids_dir> would become the
+# current directory before the app could reject it, and a blank <output_dir>
+# would be created here.
+if [ -z "${2//[[:space:]]/}" ]; then
+    echo "ERROR: bids_dir must not be empty" >&2
+    exit 2
+fi
+if [ -z "${3//[[:space:]]/}" ]; then
+    echo "ERROR: output_dir must not be empty" >&2
+    exit 2
+fi
+
 IMAGE="$1"
 BIDS_DIR="$(cd "$2" && pwd)"
 OUTPUT_DIR="$3"
