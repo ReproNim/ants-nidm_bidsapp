@@ -1477,7 +1477,10 @@ class TestRun(unittest.TestCase):
         empty.mkdir()
         message = rejection(str(empty))
         self.assertIn("is empty", message)
-        self.assertIn("datalad get -n", message)
+        # Installing alone leaves annex symlinks without content, which the
+        # lookup then rejects, so the message names both steps.
+        self.assertIn("'datalad get -n' installs it", message)
+        self.assertIn("'datalad get' fetches the NIDM files", message)
         # Any entry counts, even one the lookup would not use for this subject.
         (empty / "sub-02").mkdir()
         with patch.object(sys, "argv", base + ["--nidm-input-dir", str(empty)]):

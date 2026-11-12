@@ -476,8 +476,10 @@ def parse_arguments():
             parser.error(f"--nidm-input-dir {value!r} cannot be accessed: {e.strerror}")
         if is_empty:
             parser.error(f"--nidm-input-dir {value!r} is empty (if it is a datalad "
-                         "subdataset, install it with 'datalad get -n'; when running "
-                         "in a container, check that the right directory is mounted)")
+                         "subdataset that was never installed, 'datalad get -n' "
+                         "installs it and 'datalad get' fetches the NIDM files; when "
+                         "running in a container, check that the right directory is "
+                         "mounted)")
 
     return args
 
