@@ -432,6 +432,12 @@ def parse_arguments():
     args = parser.parse_args()
 
     # Validate arguments
+    # An empty positional is an unset variable in a wrapper script. Path("")
+    # is the current directory, so the run would read the directory the job
+    # started in as the dataset, or write its logs there.
+    for name in ("bids_dir", "output_dir"):
+        if not getattr(args, name).strip():
+            parser.error(f"{name} must not be empty")
     if args.skip_ants and not args.ants_input:
         parser.error("--skip-ants requires --ants-input to specify existing ANTs derivatives")
     if args.method is None:

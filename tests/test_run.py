@@ -1412,6 +1412,56 @@ class TestRun(unittest.TestCase):
         with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
             parse_arguments()
 
+    def test_empty_bids_dir_or_output_dir_is_rejected(self):
+        """An empty BIDS_DIR or OUTPUT_DIR is an unset variable in a wrapper
+        script. Path("") is the current directory, so the app used to read
+        the job's start directory as the dataset, or create logs/ there and
+        then crash on makedirs(""). Both are usage errors, raised before
+        anything is written."""
+        import contextlib
+        import io
+        import os
+        import sys
+        from unittest.mock import patch
+
+        from src.run import main, parse_arguments
+
+        def run_main(bids_dir, output_dir):
+            """Run main() from an empty directory; return (exit code, stderr,
+            what it left there)."""
+            start = tempfile.mkdtemp(dir=self.temp_dir)
+            err = io.StringIO()
+            argv = ["ants-nidm", bids_dir, output_dir, "participant",
+                    "--participant-label", "01"]
+            previous = os.getcwd()
+            os.chdir(start)
+            try:
+                with patch.object(sys, "argv", argv), \
+                     contextlib.redirect_stderr(err), \
+                     self.assertRaises(SystemExit) as caught:
+                    main()
+            finally:
+                os.chdir(previous)
+            return caught.exception.code, err.getvalue(), os.listdir(start)
+
+        for empty in ("", "   "):
+            with self.subTest(bids_dir=empty):
+                code, message, left = run_main(empty, "/out")
+                self.assertEqual(code, 2)
+                # The usage line lists every argument, so check the sentence.
+                self.assertIn("bids_dir must not be empty", message)
+                self.assertEqual(left, [])
+            with self.subTest(output_dir=empty):
+                code, message, left = run_main("/bids", empty)
+                self.assertEqual(code, 2)
+                self.assertIn("output_dir must not be empty", message)
+                self.assertEqual(left, [])
+
+        # A relative path, the current directory included, is still accepted.
+        with patch.object(sys, "argv", ["ants-nidm", ".", "out", "participant"]):
+            args = parse_arguments()
+        self.assertEqual((args.bids_dir, args.output_dir), (".", "out"))
+
     def test_missing_explicit_nidm_input_dir_is_rejected(self):
         """An explicit --nidm-input-dir that is not a directory is a typo or a
         missing mount; it used to warn and build NIDM without the input. So is
