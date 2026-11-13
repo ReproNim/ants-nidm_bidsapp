@@ -395,7 +395,7 @@ def parse_arguments():
                         action='store_true')
     parser.add_argument('--ants-input', help='Path to existing ANTs segmentation derivatives. Required if --skip-ants is set.',
                         type=str, default=None)
-    parser.add_argument('--nidm-input-dir', help='Directory containing existing NIDM files. Files will be searched in standard BIDS structure: sub-{id}/[ses-{session}/]sub-{id}[_ses-{session}].ttl or fallback to nidm.ttl. Defaults to <bids_dir>/../NIDM for BABS workflows.',
+    parser.add_argument('--nidm-input-dir', help='Directory containing existing NIDM files. A session run first tries sub-{id}/ses-{session}/nidm.ttl, sub-{id}_ses-{session}/nidm.ttl, sub-{id}/ses-{session}/sub-{id}_ses-{session}.ttl and sub-{id}_ses-{session}.ttl; every run then tries sub-{id}/nidm.ttl, sub-{id}/sub-{id}.ttl, sub-{id}.ttl and a dataset-level nidm.ttl. If given, it must be an existing, non-empty directory with search permission. Defaults to <bids_dir>/../NIDM for BABS workflows (which may be absent).',
                         type=str, default=None)
     
     parser.add_argument('--num-threads', help='Number of threads to use for processing [default: 1]',
@@ -432,6 +432,12 @@ def parse_arguments():
     args = parser.parse_args()
 
     # Validate arguments
+    # An empty or blank positional is an unset variable in a wrapper script. Path("")
+    # is the current directory, so the run would read the directory the job
+    # started in as the dataset, or write its logs there.
+    for name in ("bids_dir", "output_dir"):
+        if not getattr(args, name).strip():
+            parser.error(f"{name} must not be empty")
     if args.skip_ants and not args.ants_input:
         parser.error("--skip-ants requires --ants-input to specify existing ANTs derivatives")
     if args.method is None:
@@ -443,6 +449,45 @@ def parse_arguments():
         args.method = 'fusion'
     if args.fireants_batch_size < 0:
         parser.error("--fireants-batch-size must be >= 0 (0 means all atlases at once)")
+    # An explicit --nidm-input-dir that is not there is a typo or a missing
+    # mount, not a subject without NIDM: fail before any processing instead
+    # of building NIDM without the input. The default (<bids_dir>/../NIDM,
+    # what BABS relies on) may still be absent.
+    # An empty value (an unset variable in a wrapper) would otherwise mean
+    # the current directory, which can hold a previous run's output.
+    # The lookup only stats fixed candidate paths and never lists the
+    # directory, so search permission is all it needs.
+    if args.nidm_input_dir is not None:
+        value = args.nidm_input_dir
+        if not value.strip():
+            parser.error("--nidm-input-dir must not be empty")
+        nidm_dir = Path(value)
+        try:
+            is_dir = nidm_dir.is_dir()
+        except OSError as e:
+            # e.g. a parent directory without search permission
+            parser.error(f"--nidm-input-dir {value!r} cannot be accessed: {e.strerror}")
+        if not is_dir:
+            parser.error(f"--nidm-input-dir {value!r} is not a directory "
+                         "(when running in a container, check that it is mounted)")
+        if not os.access(nidm_dir, os.X_OK):
+            parser.error(f"--nidm-input-dir {value!r} is not searchable")
+        # A directory with no entries at all holds no input for any subject:
+        # usually an uninstalled datalad subdataset or an empty mount. Without
+        # read permission it cannot be listed; the lookup does not need to.
+        try:
+            with os.scandir(nidm_dir) as entries:
+                is_empty = next(entries, None) is None
+        except PermissionError:
+            is_empty = False
+        except OSError as e:
+            parser.error(f"--nidm-input-dir {value!r} cannot be accessed: {e.strerror}")
+        if is_empty:
+            parser.error(f"--nidm-input-dir {value!r} is empty (if it is a datalad "
+                         "subdataset that was never installed, 'datalad get -n' "
+                         "installs it and 'datalad get' fetches the NIDM files; when "
+                         "running in a container, check that the right directory is "
+                         "mounted)")
 
     return args
 
@@ -467,11 +512,9 @@ def initialize(args):
     else:
         nidm_input_dir = Path(args.nidm_input_dir)
 
+    # parse_arguments() already rejected a missing explicit --nidm-input-dir;
+    # only the default location can be absent here.
     if not nidm_input_dir.exists():
-        if args.nidm_input_dir is not None:
-            logging.getLogger('ants-nidm').warning(
-                f"--nidm-input-dir {nidm_input_dir} does not exist; "
-                "NIDM will be built without an input document")
         nidm_input_dir = None
 
     # Per-subject output layout (study-wide standard): everything this app

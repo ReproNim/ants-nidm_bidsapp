@@ -1412,6 +1412,143 @@ class TestRun(unittest.TestCase):
         with patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
             parse_arguments()
 
+    def test_empty_bids_dir_or_output_dir_is_rejected(self):
+        """An empty BIDS_DIR or OUTPUT_DIR is an unset variable in a wrapper
+        script. Path("") is the current directory, so the app used to read
+        the job's start directory as the dataset, or create logs/ there and
+        then crash on makedirs(""). Both are usage errors, raised before
+        anything is written."""
+        import contextlib
+        import io
+        import os
+        import sys
+        from unittest.mock import patch
+
+        from src.run import main, parse_arguments
+
+        def run_main(bids_dir, output_dir):
+            """Run main() from an empty directory; return (exit code, stderr,
+            what it left there)."""
+            start = tempfile.mkdtemp(dir=self.temp_dir)
+            err = io.StringIO()
+            argv = ["ants-nidm", bids_dir, output_dir, "participant",
+                    "--participant-label", "01"]
+            previous = os.getcwd()
+            os.chdir(start)
+            try:
+                with patch.object(sys, "argv", argv), \
+                     contextlib.redirect_stderr(err), \
+                     self.assertRaises(SystemExit) as caught:
+                    main()
+            finally:
+                os.chdir(previous)
+            return caught.exception.code, err.getvalue(), os.listdir(start)
+
+        # The other argument names a path inside the temp dir, so a build
+        # without the check writes there and nowhere else.
+        other_out = os.path.join(self.temp_dir, "given_out")
+        other_bids = os.path.join(self.temp_dir, "given_bids")
+        for empty in ("", "   "):
+            with self.subTest(bids_dir=empty):
+                code, message, left = run_main(empty, other_out)
+                self.assertEqual(code, 2)
+                # The usage line lists every argument, so check the sentence.
+                self.assertIn("bids_dir must not be empty", message)
+                self.assertEqual(left, [])
+                self.assertFalse(os.path.exists(other_out))
+            with self.subTest(output_dir=empty):
+                code, message, left = run_main(other_bids, empty)
+                self.assertEqual(code, 2)
+                self.assertIn("output_dir must not be empty", message)
+                self.assertEqual(left, [])
+
+        # A relative path, the current directory included, is still accepted.
+        with patch.object(sys, "argv", ["ants-nidm", ".", "out", "participant"]):
+            args = parse_arguments()
+        self.assertEqual((args.bids_dir, args.output_dir), (".", "out"))
+
+    def test_missing_explicit_nidm_input_dir_is_rejected(self):
+        """An explicit --nidm-input-dir that is not a directory is a typo or a
+        missing mount; it used to warn and build NIDM without the input. So is
+        an empty directory. The default stays unchecked because BABS relies
+        on it being optional."""
+        import sys
+        from unittest.mock import patch
+
+        from src.run import parse_arguments
+
+        import contextlib
+        import io
+
+        base = ["ants-nidm", "/bids", "/out", "participant"]
+
+        def rejection(value):
+            err = io.StringIO()
+            with patch.object(sys, "argv", base + ["--nidm-input-dir", value]), \
+                 contextlib.redirect_stderr(err), \
+                 self.assertRaises(SystemExit):
+                parse_arguments()
+            return err.getvalue()
+
+        missing = Path(self.temp_dir) / "no_such_nidm"
+        # Executable, so only the directory check can reject it.
+        a_file = Path(self.temp_dir) / "nidm.ttl"
+        a_file.write_text("")
+        a_file.chmod(0o755)
+        for bad in (str(missing), str(a_file)):
+            with self.subTest(path=bad):
+                self.assertIn("is not a directory", rejection(bad))
+        # "" is what an unset variable in a wrapper passes; it must not
+        # silently mean the current directory, and the message names the
+        # cause rather than sending the user to check mounts.
+        for blank in ("", "   "):
+            with self.subTest(path=blank):
+                message = rejection(blank)
+                self.assertIn("--nidm-input-dir must not be empty", message)
+                self.assertNotIn("mounted", message)
+
+        if os.geteuid() != 0:
+            # Without search permission: a usage error now, not a
+            # PermissionError mid-run.
+            locked = Path(self.temp_dir) / "locked_nidm"
+            locked.mkdir(mode=0)
+            # Under a parent without search permission, is_dir() itself
+            # raises; that is a usage error too, not a traceback.
+            hidden = locked / "nidm"
+            try:
+                self.assertIn("is not searchable", rejection(str(locked)))
+                self.assertIn("cannot be accessed", rejection(str(hidden)))
+            finally:
+                locked.chmod(0o700)
+
+            # The lookup never lists the directory, so search permission
+            # alone is enough.
+            search_only = Path(self.temp_dir) / "search_only_nidm"
+            search_only.mkdir()
+            search_only.chmod(0o100)
+            try:
+                with patch.object(sys, "argv", base + ["--nidm-input-dir", str(search_only)]):
+                    self.assertEqual(parse_arguments().nidm_input_dir, str(search_only))
+            finally:
+                search_only.chmod(0o700)
+
+        # No entries at all: an uninstalled datalad subdataset or an empty
+        # mount, which would build every subject's NIDM without its input.
+        empty = Path(self.temp_dir) / "empty_nidm"
+        empty.mkdir()
+        message = rejection(str(empty))
+        self.assertIn("is empty", message)
+        # Installing alone leaves annex symlinks without content, which the
+        # lookup then rejects, so the message names both steps.
+        self.assertIn("'datalad get -n' installs it", message)
+        self.assertIn("'datalad get' fetches the NIDM files", message)
+        # Any entry counts, even one the lookup would not use for this subject.
+        (empty / "sub-02").mkdir()
+        with patch.object(sys, "argv", base + ["--nidm-input-dir", str(empty)]):
+            self.assertEqual(parse_arguments().nidm_input_dir, str(empty))
+        with patch.object(sys, "argv", base):
+            self.assertIsNone(parse_arguments().nidm_input_dir)
+
     def test_prob_threshold_is_rejected(self):
         """--prob-threshold was accepted but never read by either method, so a
         value passed to it changed nothing. It is now an unknown argument."""

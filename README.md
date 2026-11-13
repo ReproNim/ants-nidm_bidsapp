@@ -156,7 +156,9 @@ wrapper — it sets up the binds and writable scratch the image expects:
 ```
 
 The wrapper works with an Apptainer/Singularity `.sif` file or a Docker image
-name, and passes any extra arguments straight to the app:
+name, and passes any extra arguments to the app. It mounts an explicit
+`--nidm-input-dir` read-only (refusing one that is the output directory or
+inside it) and passes its absolute path on:
 
 ```bash
 ./run_container.sh ants-nidm_bidsapp.sif /path/to/bids /path/to/output 01 \
@@ -283,11 +285,18 @@ restructure the input or open an issue.
 
 ### NIDM input
 
-`--nidm-input-dir` is searched most specific first:
+`--nidm-input-dir` is searched most specific first. A session run first tries:
 
-1. `<dir>/sub-<id>/[ses-<ses>/]nidm.ttl`
-2. `<dir>/sub-<id>/[ses-<ses>/]sub-<id>[_ses-<ses>].ttl`
-3. `<dir>/sub-<id>[_ses-<ses>].ttl`
+1. `<dir>/sub-<id>/ses-<ses>/nidm.ttl`
+2. `<dir>/sub-<id>_ses-<ses>/nidm.ttl`
+3. `<dir>/sub-<id>/ses-<ses>/sub-<id>_ses-<ses>.ttl`
+4. `<dir>/sub-<id>_ses-<ses>.ttl`
+
+Every run then tries:
+
+1. `<dir>/sub-<id>/nidm.ttl`
+2. `<dir>/sub-<id>/sub-<id>.ttl`
+3. `<dir>/sub-<id>.ttl`
 4. `<dir>/nidm.ttl`
 
 The lookup runs before segmentation. If the directory exists but none of
@@ -304,12 +313,44 @@ MRI acquisition, or several matching nodes that store the id differently
 input with no subjects at all is not an error; the
 subject is added to it.
 
+A `--nidm-input-dir` given on the command line must be an existing, non-empty
+directory the app can search; otherwise the app exits with a usage error before
+reading any image. An empty directory is usually a datalad subdataset that was
+never installed (`datalad get -n <path>` installs it, and `datalad get <path>`
+then fetches the NIDM files, which the app also needs) or an empty mount. Inside a container that means the directory must be mounted:
+`run_container.sh` binds it read-only for you (unless it is inside
+`<bids_dir>`, which is mounted already); it refuses a directory that is the
+output directory or inside it. A hand-written `docker run`
+needs its own `-v`, and so does an `apptainer run` unless the directory is
+under a path Apptainer mounts by default (`$HOME`, the current directory and
+`/tmp`, when neither `--no-home` nor `--contain` is given) or a site bind. When the flag is left out, a
+missing `<bids_dir>/../NIDM` is not an error: the app writes a new `nidm.ttl`.
+
+Two consequences of these rules:
+
+- In a datalad dataset the NIDM files are symlinks into the dataset's
+  `.git/annex`. If `--nidm-input-dir` is a subdirectory of the dataset (say
+  `<ds>/derivatives/nidm`) rather than its root, the links point above the
+  mounted directory, so inside the container they lead nowhere and the app
+  asks you to run `datalad get` even though the content is present. Either
+  give the dataset's annex a mount too (with `run_container.sh` on Apptainer,
+  `APPTAINER_BIND=<ds>:<ds>:ro`) or run `datalad unlock` on the NIDM files so
+  they are regular files.
+- To write a new `nidm.ttl` while `<bids_dir>/../NIDM` exists, a missing or
+  empty directory no longer works. Pass a directory that holds none of the
+  files listed above (one with only a README in it, for example): the app
+  logs the warning and starts a new `nidm.ttl`.
+
 ### Command-line Arguments
 
 **Required:**
 - `bids_dir`: Path to the BIDS dataset
 - `output_dir`: Path where outputs will be stored
 - `analysis_level`: Level of the analysis (`participant` or `session`)
+
+An empty or blank `bids_dir` or `output_dir` (an unset variable in a job script)
+is a usage error, in the app and in `run_container.sh`; an empty one would
+otherwise mean the current directory.
 
 **Participant/Session Selection:**
 - `--participant-label`, `--participant_label`: Label of the participant to analyze (with or without "sub-" prefix)
