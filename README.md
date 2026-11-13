@@ -326,6 +326,21 @@ under a path Apptainer mounts by default (`$HOME`, the current directory and
 `/tmp`, when neither `--no-home` nor `--contain` is given) or a site bind. When the flag is left out, a
 missing `<bids_dir>/../NIDM` is not an error: the app writes a new `nidm.ttl`.
 
+Two consequences of these rules:
+
+- In a datalad dataset the NIDM files are symlinks into the dataset's
+  `.git/annex`. If `--nidm-input-dir` is a subdirectory of the dataset (say
+  `<ds>/derivatives/nidm`) rather than its root, the links point above the
+  mounted directory, so inside the container they lead nowhere and the app
+  asks you to run `datalad get` even though the content is present. Either
+  give the dataset's annex a mount too (with `run_container.sh` on Apptainer,
+  `APPTAINER_BIND=<ds>:<ds>:ro`) or run `datalad unlock` on the NIDM files so
+  they are regular files.
+- To write a new `nidm.ttl` while `<bids_dir>/../NIDM` exists, a missing or
+  empty directory no longer works. Pass a directory that holds none of the
+  files listed above (one with only a README in it, for example): the app
+  logs the warning and starts a new `nidm.ttl`.
+
 ### Command-line Arguments
 
 **Required:**
