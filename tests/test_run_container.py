@@ -191,6 +191,21 @@ class TestRunContainer(unittest.TestCase):
                     self.assertIn("is the output directory or inside it", proc.stderr)
                     # The fake runner prints its arguments: it never started.
                     self.assertEqual(proc.stdout, "")
+        # The message names the resolved path, which is all an alias shares
+        # with the output dir.
+        proc = self.run_wrapper(self.sif, "--nidm-input-dir", str(alias),
+                                env_extra=no_tmp, expect=2)
+        self.assertIn(f"(resolved: {inside};", proc.stderr)
+        # An output dir given through a component that does not exist yet:
+        # `cd` reads nonexist/../out as out only once mkdir -p has made
+        # nonexist, so the check must not run before that.
+        self.out = self.tmp / "nonexist" / ".." / "out"
+        for image in (self.sif, "ants-nidm_bidsapp:latest"):
+            with self.subTest(image=str(image), out=str(self.out)):
+                proc = self.run_wrapper(image, "--nidm-input-dir", str(inside),
+                                        env_extra=no_tmp, expect=2)
+                self.assertIn("is the output directory or inside it", proc.stderr)
+                self.assertEqual(proc.stdout, "")
 
     def test_a_nidm_dir_outside_the_output_dir_is_mounted(self):
         """The overlap check compares whole path components: out-nidm next to
@@ -233,10 +248,18 @@ class TestRunContainer(unittest.TestCase):
         elsewhere.mkdir(parents=True)
         linked = self.bids / "NIDM"
         linked.symlink_to(elsewhere)
-        for nidm in (sibling, linked):
-            with self.subTest(nidm=str(nidm)):
-                argv = self.run_wrapper(self.sif, "--nidm-input-dir", str(nidm))
-                self.assertIn(f"{nidm}:{nidm}:ro", self.mounts(argv, "-B"))
+        # Mounted, and passed on, at the resolved path: a mount at <bids>/NIDM
+        # would land on the link inside the read-only BIDS mount, which
+        # Apptainer cannot mount onto.
+        for image, flag in ((self.sif, "-B"), ("ants-nidm_bidsapp:latest", "-v")):
+            for nidm, resolved in ((sibling, sibling), (linked, elsewhere)):
+                with self.subTest(image=str(image), nidm=str(nidm)):
+                    argv = self.run_wrapper(image, "--nidm-input-dir", str(nidm))
+                    self.assertIn(f"{resolved}:{resolved}:ro", self.mounts(argv, flag))
+                    self.assertFalse([m for m in self.mounts(argv, flag)
+                                      if m.startswith(f"{self.bids}/")])
+                    app = argv[argv.index(str(image)) + 1:]
+                    self.assertEqual(app[app.index("--nidm-input-dir") + 1], str(resolved))
 
     def test_without_the_flag_only_the_standard_binds_are_added(self):
         argv = self.run_wrapper(self.sif, "--num-threads", "8")

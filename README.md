@@ -318,9 +318,10 @@ directory the app can search; otherwise the app exits with a usage error before
 reading any image. An empty directory is usually a datalad subdataset that was
 never installed (`datalad get -n <path>` installs it, and `datalad get <path>`
 then fetches the NIDM files, which the app also needs) or an empty mount. Inside a container that means the directory must be mounted:
-`run_container.sh` binds it read-only for you (unless it is inside
-`<bids_dir>`, which is mounted already); it refuses a directory that is the
-output directory or inside it. A hand-written `docker run`
+`run_container.sh` binds it read-only for you at its resolved path (with
+symlinks followed) and passes that path to the app, unless it resolves to a
+directory inside `<bids_dir>`, which is mounted already; it refuses a
+directory that is the output directory or inside it. A hand-written `docker run`
 needs its own `-v`, and so does an `apptainer run` unless the directory is
 under a path Apptainer mounts by default (`$HOME`, the current directory and
 `/tmp`, when neither `--no-home` nor `--contain` is given) or a site bind. When the flag is left out, a
@@ -334,7 +335,8 @@ Two consequences of these rules:
   mounted directory, so inside the container they lead nowhere and the app
   asks you to run `datalad get` even though the content is present. Either
   give the dataset's annex a mount too (with `run_container.sh` on Apptainer,
-  `APPTAINER_BIND=<ds>:<ds>:ro`) or run `datalad unlock` on the NIDM files so
+  `APPTAINER_BIND=<ds>:<ds>:ro`, where `<ds>` is the dataset's resolved path,
+  as `cd <ds> && pwd -P` prints it) or run `datalad unlock` on the NIDM files so
   they are regular files.
 - To write a new `nidm.ttl` while `<bids_dir>/../NIDM` exists, a missing or
   empty directory no longer works. Pass a directory that holds none of the

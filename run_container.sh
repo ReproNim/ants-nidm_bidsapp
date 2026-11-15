@@ -59,8 +59,8 @@ case " $* " in
     *) THREAD_ARGS=(--num-threads 4) ;;
 esac
 
-# An explicit --nidm-input-dir is mounted read-only at its absolute host
-# path, since the app rejects a directory it cannot see. A value that is not
+# An explicit --nidm-input-dir is mounted read-only at its resolved host
+# path (see below), since the app rejects a directory it cannot see. A value that is not
 # a directory here is passed on unchanged, and the app reports it.
 # argparse also accepts an unambiguous prefix such as --ni; --n is ambiguous
 # with --num-threads, so argparse rejects it.
@@ -86,39 +86,48 @@ while [ "$#" -gt 0 ]; do
     if [ -n "$nidm_value" ] && nidm_abs="$(cd "$nidm_value" 2>/dev/null && pwd)"; then
         nidm_value="$nidm_abs"
         NIDM_DIR="$nidm_abs"
+        NIDM_IDX=$(( ${#APP_ARGS[@]} + 1 ))
     fi
     APP_ARGS+=(--nidm-input-dir "$nidm_value")
 done
 
-# The NIDM input must not be the output directory or lie inside it: its
-# read-only mount would cover the outputs, which are written there only after
-# the GPU work is done. Checked on both the given and the resolved paths, so a
-# symlinked alias is caught too. An output directory that does not exist yet
-# cannot contain an existing NIDM directory.
-if [ -n "$NIDM_DIR" ] && [ -d "$OUTPUT_DIR" ]; then
-    out_abs="$(cd "$OUTPUT_DIR" && pwd)"
-    out_phys="$(cd "$OUTPUT_DIR" && pwd -P)"
+# A directory whose resolved path is inside the resolved <bids_dir> is visible
+# through the BIDS mount at the same suffix. Anything else is mounted, and
+# passed on, at its resolved path: a mount at a path with a symlink in it can
+# land on the link inside another mount (the BIDS dir, the working directory,
+# /tmp), and Apptainer then mounts it where the container cannot see it.
+NIDM_MOUNT=""
+if [ -n "$NIDM_DIR" ]; then
     nidm_phys="$(cd "$NIDM_DIR" && pwd -P)"
-    case "$NIDM_DIR/" in "$out_abs/"*) nidm_in_output=1 ;; *) nidm_in_output="" ;; esac
-    case "$nidm_phys/" in "$out_phys/"*) nidm_in_output=1 ;; esac
-    if [ -n "$nidm_in_output" ]; then
-        echo "ERROR: --nidm-input-dir $NIDM_DIR is the output directory or inside it;" \
-             "its read-only mount would cover the outputs. Give the NIDM input" \
-             "from a directory outside $out_abs." >&2
-        exit 2
-    fi
+    bids_phys="$(cd "$BIDS_DIR" && pwd -P)"
+    case "$nidm_phys/" in
+        "$bids_phys/"*) APP_ARGS[NIDM_IDX]="$BIDS_DIR${nidm_phys#"$bids_phys"}" ;;
+        *) APP_ARGS[NIDM_IDX]="$nidm_phys"; NIDM_MOUNT="$nidm_phys" ;;
+    esac
 fi
-# A directory inside <bids_dir> is already visible through the BIDS mount,
-# unless a symlink on the way leads out of it: then the resolved path is not
-# the BIDS dir's resolved path plus the same suffix, and it is mounted.
-NIDM_MOUNT="$NIDM_DIR"
-case "$NIDM_DIR/" in "$BIDS_DIR/"*)
-    [ "$(cd "$NIDM_DIR" && pwd -P)" = "$(cd "$BIDS_DIR" && pwd -P)${NIDM_DIR#"$BIDS_DIR"}" ] \
-        && NIDM_MOUNT="" ;;
-esac
 
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+
+# The NIDM input must not be the output directory or lie inside it: the app
+# would read its own outputs as input, and a read-only mount over them would
+# make the outputs, written only after the GPU work, fail. Checked on both the
+# given and the resolved paths, so a symlinked alias is caught too. Checked
+# after mkdir -p: `cd` reads a path like nonexist/../out as out, but only once
+# nonexist exists.
+if [ -n "$NIDM_DIR" ]; then
+    out_phys="$(cd "$OUTPUT_DIR" && pwd -P)"
+    nidm_phys="$(cd "$NIDM_DIR" && pwd -P)"
+    case "$NIDM_DIR/" in "$OUTPUT_DIR/"*) nidm_in_output=1 ;; *) nidm_in_output="" ;; esac
+    case "$nidm_phys/" in "$out_phys/"*) nidm_in_output=1 ;; esac
+    if [ -n "$nidm_in_output" ]; then
+        echo "ERROR: --nidm-input-dir $NIDM_DIR is the output directory or inside it" \
+             "(resolved: $nidm_phys; output resolved: $out_phys). The NIDM input" \
+             "must not share a directory with the outputs: give it from a directory" \
+             "outside $OUTPUT_DIR." >&2
+        exit 2
+    fi
+fi
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ants-nidm-work.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
