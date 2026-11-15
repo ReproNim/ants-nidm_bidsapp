@@ -202,6 +202,8 @@ class TestRunContainer(unittest.TestCase):
         self.out = self.tmp / "nonexist" / ".." / "out"
         for image in (self.sif, "ants-nidm_bidsapp:latest"):
             with self.subTest(image=str(image), out=str(self.out)):
+                # Each case starts without nonexist/, which the wrapper makes.
+                shutil.rmtree(self.tmp / "nonexist", ignore_errors=True)
                 proc = self.run_wrapper(image, "--nidm-input-dir", str(inside),
                                         env_extra=no_tmp, expect=2)
                 self.assertIn("is the output directory or inside it", proc.stderr)
@@ -237,6 +239,23 @@ class TestRunContainer(unittest.TestCase):
                                       if m.startswith(f"{bids}/")])
                     app = argv[argv.index(str(image)) + 1:]
                     self.assertEqual(app[app.index("--nidm-input-dir") + 1], nidm)
+
+    def test_a_nidm_dir_in_a_bids_dir_given_through_an_alias_is_passed_as_given(self):
+        """<bids_dir> given through a symlinked path (on ORCD, /home/<user> is
+        an alias of /orcd/home/...): the BIDS dir is mounted at the given
+        path, so the NIDM dir inside it must reach the app under that path
+        too, not under its resolved one, which nothing mounts."""
+        (self.bids / "NIDM").mkdir()
+        alias = self.tmp / "bids_alias"
+        alias.symlink_to(self.bids)
+        self.bids = alias
+        for image, flag in ((self.sif, "-B"), ("ants-nidm_bidsapp:latest", "-v")):
+            with self.subTest(image=str(image)):
+                argv = self.run_wrapper(image, "--nidm-input-dir", f"{alias}/NIDM")
+                self.assertEqual([m for m in self.mounts(argv, flag) if m.endswith(":ro")],
+                                 [f"{alias}:{alias}:ro"])
+                app = argv[argv.index(str(image)) + 1:]
+                self.assertEqual(app[app.index("--nidm-input-dir") + 1], f"{alias}/NIDM")
 
     def test_a_nidm_dir_reached_out_of_the_bids_dir_is_mounted(self):
         """A sibling whose name starts like the BIDS dir is not inside it, and
