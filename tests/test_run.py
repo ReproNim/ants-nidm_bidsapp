@@ -1495,7 +1495,12 @@ class TestRun(unittest.TestCase):
         a_file = Path(self.temp_dir) / "nidm.ttl"
         a_file.write_text("")
         a_file.chmod(0o755)
-        for bad in (str(missing), str(a_file)):
+        # A symlink loop (ELOOP) and a path through a file (ENOTDIR) are
+        # not directories either, not inaccessible ones.
+        loop = Path(self.temp_dir) / "loop_nidm"
+        loop.symlink_to(loop)
+        through_file = a_file / "nidm"
+        for bad in (str(missing), str(a_file), str(loop), str(through_file)):
             with self.subTest(path=bad):
                 self.assertIn("is not a directory", rejection(bad))
         # "" is what an unset variable in a wrapper passes; it must not
@@ -1518,6 +1523,10 @@ class TestRun(unittest.TestCase):
             try:
                 self.assertIn("is not searchable", rejection(str(locked)))
                 self.assertIn("cannot be accessed", rejection(str(hidden)))
+                # Python 3.14's Path.is_dir() returns False on EACCES
+                # instead of raising; the check must not depend on it.
+                with patch.object(Path, "is_dir", return_value=False):
+                    self.assertIn("cannot be accessed", rejection(str(hidden)))
             finally:
                 locked.chmod(0o700)
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # src/run.py
 
+import errno
 import os
+import stat
 import sys
 import argparse
 import json
@@ -462,11 +464,18 @@ def parse_arguments():
         if not value.strip():
             parser.error("--nidm-input-dir must not be empty")
         nidm_dir = Path(value)
+        # os.stat, not Path.is_dir(): from Python 3.14 is_dir() returns False
+        # on EACCES, which would report an inaccessible directory as missing.
         try:
-            is_dir = nidm_dir.is_dir()
+            is_dir = stat.S_ISDIR(os.stat(nidm_dir).st_mode)
+        except (FileNotFoundError, NotADirectoryError):
+            is_dir = False
         except OSError as e:
-            # e.g. a parent directory without search permission
-            parser.error(f"--nidm-input-dir {value!r} cannot be accessed: {e.strerror}")
+            if e.errno == errno.ELOOP:
+                is_dir = False
+            else:
+                # e.g. a parent directory without search permission
+                parser.error(f"--nidm-input-dir {value!r} cannot be accessed: {e.strerror}")
         if not is_dir:
             parser.error(f"--nidm-input-dir {value!r} is not a directory "
                          "(when running in a container, check that it is mounted)")
