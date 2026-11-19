@@ -36,17 +36,22 @@ BUILD_EXT_CMD = r"python3 setup\.py build_ext"
 FUSED_OPS_ASSERTION_CMD = r'python3 -c "import torch, fireants_fused_ops'
 
 
+def _post_body(text=None):
+    """The raw text of Singularity's %post section."""
+    text = SINGULARITY if text is None else text
+    # Anchor on the section header at the start of a line: "%post" also occurs
+    # in prose inside the header comment.
+    post = re.search(r"^%post\s*$", text, re.MULTILINE)
+    assert post, "Singularity has no %post section"
+    rest = text[post.end():]
+    nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
+    return rest[: nxt.start()] if nxt else rest
+
+
 def _post_statements():
     """Non-blank, non-comment lines of Singularity's %post, stripped, with
     `\\`-continuation lines joined into the line they continue."""
-    # Anchor on the section header at the start of a line: "%post" also occurs
-    # in prose inside the header comment.
-    post = re.search(r"^%post\s*$", SINGULARITY, re.MULTILINE)
-    assert post, "Singularity has no %post section"
-    rest = SINGULARITY[post.end():]
-    nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
-    body = rest[: nxt.start()] if nxt else rest
-    return _join_continuations(body)
+    return _join_continuations(_post_body())
 
 
 def _join_continuations(text):
@@ -450,6 +455,236 @@ def _check_unit(name, pattern):
     return found[0]
 
 
+def _shell_tokens(line):
+    """Split one logical shell line into (kind, text) tokens, kind being
+    'word', 'op' (`; ;; & && | || ( )`) or 'heredoc' (text is the delimiter,
+    prefixed `-` for `<<-`). Quotes, `$( )` and backticks stay inside their
+    word, so parentheses in them do not count as operators. Not a full shell
+    grammar: enough to follow the POSIX compound commands."""
+    tokens, cur, i, n = [], [], 0, len(line)
+
+    def flush():
+        if cur:
+            tokens.append(("word", "".join(cur)))
+            cur.clear()
+
+    def skip_balanced(i):
+        """Index after the `)` that closes the `(` at i, honouring quotes."""
+        depth = 0
+        while i < n:
+            c = line[i]
+            if c == "\\":
+                i += 2
+                continue
+            if c in "'\"":
+                j = line.find(c, i + 1)
+                i = n if j < 0 else j + 1
+                continue
+            depth += (c == "(") - (c == ")")
+            i += 1
+            if depth == 0:
+                break
+        return i
+
+    while i < n:
+        c = line[i]
+        if c in " \t":
+            flush()
+            i += 1
+        elif c == "\\":
+            cur.append(line[i:i + 2])
+            i += 2
+        elif c == "'":
+            j = line.find("'", i + 1)
+            j = n if j < 0 else j + 1
+            cur.append(line[i:j])
+            i = j
+        elif c == '"':
+            j = i + 1
+            while j < n and line[j] != '"':
+                if line[j] == "\\":
+                    j += 2
+                elif line.startswith("$(", j):
+                    j = skip_balanced(j + 1)
+                else:
+                    j += 1
+            cur.append(line[i:j + 1])
+            i = j + 1
+        elif c == "`":
+            j = line.find("`", i + 1)
+            j = n if j < 0 else j + 1
+            cur.append(line[i:j])
+            i = j
+        elif c == "$" and line.startswith("$(", i):
+            j = skip_balanced(i + 1)
+            cur.append(line[i:j])
+            i = j
+        elif c == "#" and not cur:
+            break
+        elif c in ";&|()":
+            flush()
+            two = line[i:i + 2]
+            if two in (";;", "&&", "||"):
+                tokens.append(("op", two))
+                i += 2
+            else:
+                tokens.append(("op", c))
+                i += 1
+        elif c in "<>":
+            if line.startswith("<<", i) and not line.startswith("<<<", i):
+                flush()
+                i += 2
+                dash = line.startswith("-", i)
+                i += dash
+                while i < n and line[i] in " \t":
+                    i += 1
+                j = i
+                while j < n and line[j] not in " \t;&|()<>":
+                    if line[j] in "'\"":
+                        k = line.find(line[j], j + 1)
+                        j = n if k < 0 else k
+                    j += 1
+                delim = re.sub(r"""['"\\]""", "", line[i:j])
+                tokens.append(("heredoc", ("-" if dash else "") + delim))
+                i = j
+            else:
+                # A redirection (`>`, `2>&1`, `>|`): its `&` is not a control
+                # operator, so it stays in the word.
+                cur.append(c)
+                i += 1
+                while i < n and line[i] in "<>&|":
+                    cur.append(line[i])
+                    i += 1
+        else:
+            cur.append(c)
+            i += 1
+    flush()
+    return tokens
+
+
+class _PostLine:
+    """One `%post` command line: its text (as _join_continuations gives it),
+    the compound-command depth it starts at, and every exit/exec/return in it
+    as (word, depth, next word)."""
+
+    def __init__(self, text, depth):
+        self.text, self.depth, self.exits = text, depth, []
+
+
+_OPENERS = {"if": "fi", "while": "done", "until": "done", "for": "done", "case": "esac"}
+_CLOSERS = {"fi", "done", "esac"}
+_LEADERS = {"then", "do", "else", "elif", "!", "time"}
+
+
+def _scan_post(body):
+    """Follow POSIX compound-command nesting over the command lines of a
+    %post body: `if`/`fi`, `for`/`while`/`until` ... `done`, `case`/`esac`,
+    `{`/`}`, `(`/`)` and function bodies (a function's `{` or `(` is a
+    compound like any other). Heredoc bodies are skipped up to their
+    delimiter, so a check inside one is never seen as a command line.
+    Returns (lines, errors); errors lists unbalanced constructs and heredocs
+    that never end, after which the scan cannot be trusted."""
+    raw = body.splitlines()
+    lines, errors, stack = [], [], []
+    i = 0
+    while i < len(raw):
+        stripped = raw[i].strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        parts = []
+        while True:
+            s = raw[i].strip()
+            cont = s.endswith("\\")
+            parts.append(s[:-1].rstrip() if cont else s)
+            i += 1
+            if not cont or i >= len(raw):
+                break
+        text = " ".join(parts)
+        line = _PostLine(text, len(stack))
+        lines.append(line)
+        cmd_pos, fn_name, heredocs = True, False, []
+        tokens = _shell_tokens(text)
+        for idx, (kind, tok) in enumerate(tokens):
+            if kind == "heredoc":
+                heredocs.append(tok)
+            elif kind == "op":
+                if tok == "(":
+                    stack.append("(")
+                elif tok == ")":
+                    if stack and stack[-1] == "(":
+                        stack.pop()
+                    elif not stack or stack[-1] != "case":
+                        errors.append(f"unmatched `)` in {text!r}")
+                cmd_pos = True
+            elif fn_name:
+                fn_name, cmd_pos = False, True
+            elif cmd_pos and re.fullmatch(r"[A-Za-z_]\w*=.*", tok):
+                pass
+            elif cmd_pos and tok in _OPENERS:
+                stack.append(tok)
+                cmd_pos = tok in ("if", "while", "until")
+            elif cmd_pos and tok in _LEADERS:
+                pass
+            elif cmd_pos and tok == "function":
+                fn_name = True
+            elif cmd_pos and tok == "{":
+                stack.append("{")
+            elif cmd_pos and tok == "}":
+                if stack and stack[-1] == "{":
+                    stack.pop()
+                else:
+                    errors.append(f"unmatched `}}` in {text!r}")
+                cmd_pos = False
+            elif cmd_pos and tok in _CLOSERS:
+                if stack and _OPENERS.get(stack[-1]) == tok:
+                    stack.pop()
+                else:
+                    errors.append(f"unmatched `{tok}` in {text!r}")
+                cmd_pos = False
+            elif cmd_pos and tok in ("exit", "exec", "return"):
+                nxt = tokens[idx + 1][1] if idx + 1 < len(tokens) else ""
+                line.exits.append((tok, len(stack), nxt))
+                cmd_pos = False
+            else:
+                cmd_pos = False
+            if kind == "op" and tok in ("(", ";", ";;", "&", "&&", "|", "||", ")"):
+                cmd_pos = True
+        for spec in heredocs:
+            delim = spec.lstrip("-")
+            while i < len(raw):
+                end = raw[i].lstrip("\t") if spec.startswith("-") else raw[i]
+                i += 1
+                if end == delim:
+                    break
+            else:
+                errors.append(f"heredoc {delim!r} is never closed")
+    if stack:
+        errors.append(f"%post ends inside {stack[-1]!r}")
+    return lines, errors
+
+
+def _post_structure_problem(body, unit):
+    """Why `unit` (a %post command line) may not run, or None. It must be a
+    command line of its own at nesting depth 0 (not inside a group, `if`,
+    function or heredoc body), and nothing before it may leave %post early: no
+    `exit`, `exec` or `return` at depth 0, and none inside a compound unless it
+    is `exit` with a non-zero literal status (the recipe's own error exits)."""
+    lines, errors = _scan_post(body)
+    if errors:
+        return errors[0]
+    at = [i for i, line in enumerate(lines) if line.text == unit]
+    if len(at) != 1:
+        return f"{unit[:40]!r} is not one command line of %post (inside a heredoc?)"
+    if lines[at[0]].depth:
+        return f"{unit[:40]!r} sits inside a compound command or function body"
+    for line in lines[:at[0]]:
+        for word, depth, arg in line.exits:
+            if depth == 0 or not (word == "exit" and re.fullmatch(r"[1-9]\d*", arg)):
+                return f"`{word}` in {line.text!r} can end %post before the check"
+    return None
+
+
 def _post_keeps_errexit(statements):
     """`set -e` first, and no later `set` turns it off (`set +e`, `set -x +e`,
     `set +o errexit`)."""
@@ -457,7 +692,7 @@ def _post_keeps_errexit(statements):
         re.search(r"\bset\b[^;&|]*?\s(\+[A-Za-z]*e|\+o\s+errexit\b)", s) for s in statements)
 
 
-def _can_fail_the_build(unit, name, post=None):
+def _can_fail_the_build(unit, name, post=None, body=None):
     """Whether a failing check fails the build.
 
     Singularity: the %post command line is the check alone, optionally with
@@ -466,16 +701,23 @@ def _can_fail_the_build(unit, name, post=None):
     Dockerfile: a plain RUN instruction (no heredoc, which runs without
     `set -e`) whose commands are joined by `&&` only, with no `!`, and the
     check right after `RUN` or an `&&`.
-    Either way, no `python3 -O`."""
+    Either way, no `python3 -O`; and nothing before the check may leave early:
+    in the Dockerfile no `exit` or `exec` earlier in the RUN, in Singularity
+    the check is a depth-0 command line with no early exit before it (see
+    _post_structure_problem). `body` is the %post text, default the recipe's."""
     shell = _shell_outside_quotes(unit)
     if re.search(r"python3\s+-O", shell):
         return False
     if name == "Dockerfile":
+        at = re.search(r'(^RUN |&& )python3 -c ""', shell)
         return (shell.startswith("RUN ") and "<<" not in shell
-                and re.search(r'(^RUN |&& )python3 -c ""', shell) is not None
-                and not re.search(r";|\||(?<!&)&(?!&)|(^|\s)!(\s|$)", shell))
+                and at is not None
+                and not re.search(r";|\||(?<!&)&(?!&)|(^|\s)!(\s|$)", shell)
+                and not re.search(r"\b(exit|exec)\b",
+                                  re.sub(r"'[^']*'", "''", shell[:at.start()])))
     return (re.fullmatch(r'(PYTHONPATH=/opt )?python3 -c ""', shell) is not None
-            and _post_keeps_errexit(_post_statements() if post is None else post))
+            and _post_keeps_errexit(_post_statements() if post is None else post)
+            and _post_structure_problem(_post_body() if body is None else body, unit) is None)
 
 
 SWALLOWING_SUFFIXES = [" || true", " || :", " || exit 0", "; true", " || echo skipped", " &", " | cat",
@@ -506,10 +748,12 @@ def test_build_checks_can_fail_the_build(name, check, pattern, prefix, suffix):
         post = re.search(r"^%post\s*$", mutated, re.MULTILINE)
         rest = mutated[post.end():]
         nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
-        units = _join_continuations(rest[: nxt.start()] if nxt else rest)
+        body = rest[: nxt.start()] if nxt else rest
+        units = _join_continuations(body)
     found = [u for u in units if code[0].group(0) in u]
     assert len(found) == 1, (name, check, prefix, suffix, found)
-    ok = _can_fail_the_build(found[0], name, post=None if name == "Dockerfile" else units)
+    ok = _can_fail_the_build(found[0], name, post=None if name == "Dockerfile" else units,
+                             body=None if name == "Dockerfile" else body)
     assert ok == (prefix == suffix == ""), (name, check, prefix, suffix, found[0])
 
 
@@ -555,3 +799,104 @@ def test_converter_import_check_asserts_the_pinned_pynidm(text, name):
 def test_ci_installs_the_pinned_pynidm():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert set(re.findall(r"pynidm==([\d.]+)", ci)) == {PYNIDM_PIN}
+
+
+# Shell structure around a check. Every line-level rule above reads one command
+# line, so these build %post bodies and RUN instructions whose check line is
+# unchanged and whose surroundings stop it from failing the build.
+CHECK = 'python3 -c "import sys; sys.exit(0)"'
+
+# Each entry: the lines placed where the check goes, CHECK being the check line
+# itself; the rest of the body is `set -e`, an echo before and an echo after.
+POST_BYPASSES = {
+    # the check runs and its failure is ignored
+    "if-condition": ["if", CHECK, "then :; fi"],
+    "subshell-or-true": ["(", CHECK, ") || true"],
+    "group-into-tee": ["{", CHECK, "} 2>&1 | tee /tmp/post.log"],
+    "child-shell-heredoc": ["sh <<'EOF'", CHECK, "true", "\nEOF"],
+    # the check never runs
+    "heredoc-comment": [": <<'EOF'", CHECK, "\nEOF"],
+    "uncalled-function": ["check() {", CHECK, "}"],
+    "uncalled-function-keyword": ["function check {", CHECK, "}"],
+    "if-false": ["if false; then", CHECK, "fi"],
+    "while-false": ["while false; do", CHECK, "done"],
+    "for-empty": ["for x in; do", CHECK, "done"],
+    "case-no-match": ["case x in", "y)", CHECK, ";;", "esac"],
+    "exit-0-before": ["exit 0", CHECK],
+    "exit-bare-before": ["exit", CHECK],
+    "exec-before": ["exec true", CHECK],
+    "return-before": ["return 0", CHECK],
+    "conditional-exit-before": ["true && exit 0", CHECK],
+    "exit-0-in-if-before": ["if true; then exit 0; fi", CHECK],
+    "exit-0-in-group-before": ["{ exit 0; }", CHECK],
+    # structure the scanner cannot close is not trusted either
+    "unclosed-if": ["if true; then", CHECK],
+    "unclosed-heredoc": [": <<'EOF'", CHECK],
+    "indented-heredoc-end": [": <<'EOF'", "x", "    EOF", CHECK],
+    "stray-fi": ["fi", CHECK],
+}
+
+# Structure that does not touch the check.
+POST_HARMLESS = {
+    "plain": [CHECK],
+    "single-line-if-before": ["if [ -z \"$X\" ]; then echo none; fi", CHECK],
+    "multi-line-if-before": ["if [ -n \"$X\" ]; then", "    echo set", "fi", CHECK],
+    "if-with-error-exit-before": ["if [ -z \"$X\" ]; then", "    echo no >&2", "    exit 1", "fi", CHECK],
+    "for-loop-before": ["for x in a b; do echo $x; done", CHECK],
+    "case-before": ["case $X in", "a) echo a ;;", "*) echo other ;;", "esac", CHECK],
+    "group-before": ["{ echo a; echo b; } > /dev/null", "(cd /tmp && ls) > /dev/null", CHECK],
+    "command-substitution-before": ['u="$(find /opt \\( -type f \\) -o \\( -type d \\))"', CHECK],
+    "heredoc-before": ["cat > /tmp/f <<EOF", "if (", "\nEOF", CHECK],
+    "function-defined-and-called-before": ["f() { echo f; }", "f", CHECK],
+    "compound-after": [CHECK, "if true; then", "    exit 1", "fi"],
+    "exit-after": [CHECK, "exit 0"],
+}
+
+
+def _post_body_with(lines):
+    return "\n    ".join(["", "set -e", "echo before"] + lines + ["echo after", ""])
+
+
+@pytest.mark.parametrize("lines", POST_BYPASSES.values(), ids=POST_BYPASSES.keys())
+def test_post_check_inside_other_shell_structure_cannot_pass(lines):
+    """Each form leaves the check line as it is, passes the line-level rules,
+    and either ignores the check's failure or never runs it."""
+    body = _post_body_with(lines)
+    assert not _can_fail_the_build(CHECK, "Singularity", post=_join_continuations(body), body=body)
+
+
+@pytest.mark.parametrize("lines", POST_HARMLESS.values(), ids=POST_HARMLESS.keys())
+def test_post_check_after_unrelated_shell_structure_passes(lines):
+    body = _post_body_with(lines)
+    assert _can_fail_the_build(CHECK, "Singularity", post=_join_continuations(body), body=body)
+
+
+def test_post_structure_scan_accepts_the_recipe():
+    lines, errors = _scan_post(_post_body())
+    assert errors == []
+    assert lines
+    for pattern in (FUSED_OPS_ASSERTION_CMD, CONVERTER_IMPORT_CHECK):
+        assert _post_structure_problem(_post_body(), _check_unit("Singularity", pattern)) is None
+
+
+DOCKER_BYPASSES = {
+    "exit-0-before": "RUN exit 0 && " + CHECK,
+    "exec-true-before": "RUN exec true && " + CHECK,
+    "exit-later-in-chain": "RUN echo a && exit 0 && echo b && " + CHECK,
+    "exec-mid-chain": "RUN echo a && exec sh -c true && " + CHECK,
+}
+DOCKER_HARMLESS = {
+    "plain": "RUN " + CHECK,
+    "after-commands": "RUN echo a && echo b && " + CHECK,
+    "word-in-quotes": "RUN echo 'exit 0' && " + CHECK,
+}
+
+
+@pytest.mark.parametrize("run", DOCKER_BYPASSES.values(), ids=DOCKER_BYPASSES.keys())
+def test_dockerfile_run_that_exits_before_the_check_cannot_pass(run):
+    assert not _can_fail_the_build(run, "Dockerfile")
+
+
+@pytest.mark.parametrize("run", DOCKER_HARMLESS.values(), ids=DOCKER_HARMLESS.keys())
+def test_dockerfile_run_without_early_exit_passes(run):
+    assert _can_fail_the_build(run, "Dockerfile")
