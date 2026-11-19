@@ -8,33 +8,51 @@ Each `python3 -c` build check must be able to fail the build. The recipes are
 read with bashlex (a shell parser, test-only dependency), and a check passes
 only under these rules:
 
-Singularity %post (run by sh with `set -e`):
+Singularity %post (Apptainer runs it as `/bin/sh -ex`; the rule still asks for
+`set -e` in the recipe). %post ends at the next line whose first word starts
+with `%`, as Apptainer's definition-file parser reads it, header arguments and
+comments included (`%runscript -c /bin/bash`, `%startscript # x`). %post may
+not contain `{{`: Apptainer substitutes `{{ VAR }}` build arguments into the
+text before any shell sees it.
 - The check is a top-level simple command of %post: not inside an
   if/while/until/for/case compound, a `{ }` group, a `( )` subshell or a
   function body; not an operand of `&&`, `||`, `|` or `!`; not run with `&`;
   not in a heredoc body or a command substitution; and the command is the
-  check alone (`[PYTHONPATH=/opt ]python3 -c "..."`, no `-O`).
-- A top-level `set` turns errexit on before the check (`set -e` inside a
-  compound does not count).
+  check alone (`[PYTHONPATH=/opt ]python3 -c "..."`, no `-O`), apart from
+  redirections, which do not change its status (`>/dev/null`, `2>&1`).
+- A top-level `set` that is not run with `&` turns errexit on before the
+  check (`set -e` inside a compound, or after the check, does not count).
 - Nothing before the check, at any depth (function bodies and command
   substitutions included), can end %post with status 0, override its status
   or turn errexit off: `exit` unless its status is a literal 1-255, `exec`
   with a command (`exec` with only redirections is fine), `return` outside a
   function body, `trap`, `eval`, `.`, `source`, `alias`, `command` or
-  `builtin` wrapping any of these, a command name that is an expansion, a
-  function named `python3`, and any `set` other than -e -u -x -v and
-  -o errexit|nounset|xtrace|verbose|pipefail (so every spelling of `set +e`,
-  and `set -n`, is rejected). `exit $?` is rejected too: inside
+  `builtin` wrapping any of these, `shopt`, `hash`, `enable`, a command name
+  that is an expansion, a function named `python3`, and any `set` other than
+  -e -u -x -v and -o errexit|nounset|xtrace|verbose|pipefail, alone or
+  combined (`set -eo pipefail`), so every spelling of `set +e`, and
+  `set -n` / `set -o noexec`, is rejected. `exit $?` is rejected too: inside
   `if true; then exit $?; fi` it exits 0.
 - What follows the check does not matter: a failing check stops %post first.
 
 Dockerfile RUN (run by sh -c, no errexit): the instruction is the check alone
 or a `&&` chain of simple commands that includes it, with no heredoc, and the
-commands before the check pass the same "nothing before" rule.
+commands before the check pass the same "nothing before" rule. Leading
+BuildKit flags (`--mount=`, `--network=`, `--security=`) are dropped before
+parsing, as Docker does. The Dockerfile may have no SHELL instruction other
+than the default `SHELL ["/bin/sh", "-c"]`, and every check must sit in the
+final build stage (after the last FROM): BuildKit skips stages the target does
+not need, and the tests do not follow stage dependencies.
 
-The rules fail closed: bashlex 0.18 does not parse `case` or `time` (and needs
-quoted heredoc delimiters unquoted first, which the tests do), and a recipe it
-cannot parse fails with bashlex's message. The rules were checked against
+Not covered: replacing the `python3` the check runs, by putting another one
+earlier on PATH, overwriting or symlinking the binary (`ln -sf ...`), or
+pointing PYTHONPATH elsewhere in the environment. The rule is about shell
+structure; it cannot rule these out without rejecting lines the recipe needs.
+
+The rules fail closed: bashlex 0.18 does not parse `case`, `time`, `select`,
+`coproc` or arithmetic expansion (`$((...))`, `$[...]`), and needs quoted
+heredoc delimiters unquoted first, which the tests do for delimiters free of
+shell metacharacters. A recipe it cannot parse fails with bashlex's message. The rules were checked against
 `bash --posix -e`; the image's /bin/sh is dash, which uses the same POSIX
 errexit, exit and trap semantics.
 """
@@ -71,6 +89,11 @@ BUILD_EXT_CMD = r"python3 setup\.py build_ext"
 FUSED_OPS_ASSERTION_CMD = r'python3 -c "import torch, fireants_fused_ops'
 
 
+# Apptainer ends a definition-file section at any line whose first word
+# starts with `%` (pkg/build/types/parser/deffile.go), whatever follows it.
+SECTION_START = r"^[ \t]*%\S"
+
+
 def _post_body(text=None):
     """The raw text of Singularity's %post section."""
     text = SINGULARITY if text is None else text
@@ -79,7 +102,7 @@ def _post_body(text=None):
     post = re.search(r"^%post\s*$", text, re.MULTILINE)
     assert post, "Singularity has no %post section"
     rest = text[post.end():]
-    nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
+    nxt = re.search(SECTION_START, rest, re.MULTILINE)
     return rest[: nxt.start()] if nxt else rest
 
 
@@ -354,7 +377,7 @@ def _singularity_section(name):
     head = re.search(rf"^%{name}\s*$", SINGULARITY, re.MULTILINE)
     assert head, f"Singularity has no %{name} section"
     rest = SINGULARITY[head.end():]
-    nxt = re.search(r"^%\w+\s*$", rest, re.MULTILINE)
+    nxt = re.search(SECTION_START, rest, re.MULTILINE)
     return _commands(rest[: nxt.start()] if nxt else rest)
 
 
@@ -496,7 +519,8 @@ def _check_unit(name, pattern):
 # delimiter only stops expansion inside the body, which bashlex does not parse
 # either way, so the delimiter is unquoted before parsing. The replacement has
 # the same length, so node positions still index the original text.
-_QUOTED_HEREDOC = re.compile(r"""(?<![\\<])<<(-?)([ \t]*)(?:'(\w+)'|"(\w+)"|\\(\w+))""")
+_DELIM = r"""[^\s'"\\;&|<>()$`]+"""
+_QUOTED_HEREDOC = re.compile(rf"""(?<![\\<])<<(-?)([ \t]*)(?:'({_DELIM})'|"({_DELIM})"|\\({_DELIM}))""")
 
 
 def _unquote_heredoc_delimiters(src):
@@ -602,7 +626,16 @@ def _check_command_problem(node, span, src):
         return f"the check sits in {inner} of `{text[:60]}`, not in a command of its own"
     if re.search(r"python3\s+-O", text):
         return "the check runs under `python3 -O`"
-    if not CHECK_COMMAND.fullmatch(text):
+    # Redirections around the command leave its status alone.
+    core = [p for p in node.parts if p.kind != "redirect"]
+    redirects = [p for p in node.parts if p.kind == "redirect"]
+    if not core:
+        return f"the check shares its command with other words: `{text[:80]}`"
+    lo, hi = core[0].pos[0], core[-1].pos[1]
+    if any(r.type.startswith("<<") for r in redirects):
+        return f"the check's command has a heredoc: `{text[:80]}`"
+    # A redirection between the words lands inside src[lo:hi] and fails this.
+    if not CHECK_COMMAND.fullmatch(src[lo:hi]):
         return f"the check shares its command with other words: `{text[:80]}`"
     return None
 
@@ -621,7 +654,7 @@ def _placement_problem(parts, backgrounded, span, src):
     return f"the check is inside {_describe(node)}"
 
 
-_SET_FLAGS = re.compile(r"-[euxv]+")
+_SET_FLAGS = re.compile(r"-([euxv]*)(o?)")
 _SET_LONG = {"errexit", "nounset", "xtrace", "verbose", "pipefail"}
 _EXIT_STATUS = re.compile(r"[1-9]\d?|1\d\d|2[0-4]\d|25[0-5]")
 
@@ -631,18 +664,29 @@ def _literal(word):
     return word.kind == "word" and not getattr(word, "parts", None)
 
 
-def _set_problem(args, text):
-    i = 0
+def _set_options(args):
+    """The options a `set` command turns on (short letters and long names),
+    or None when it uses anything outside the allowlist."""
+    on, i = set(), 0
     while i < len(args):
         a = args[i]
-        if _literal(a) and _SET_FLAGS.fullmatch(a.word):
+        m = _SET_FLAGS.fullmatch(a.word) if _literal(a) else None
+        if not m or a.word == "-":
+            return None
+        on |= set(m.group(1))
+        i += 1
+        if m.group(2):  # -o, alone or ending a group (-eo): a long name follows
+            if i >= len(args) or not _literal(args[i]) or args[i].word not in _SET_LONG:
+                return None
+            on.add(args[i].word)
             i += 1
-        elif (a.word == "-o" and i + 1 < len(args)
-              and _literal(args[i + 1]) and args[i + 1].word in _SET_LONG):
-            i += 2
-        else:
-            return (f"`{text}` may turn errexit off (allowed: `set` with -e -u -x -v or "
-                    "-o errexit|nounset|xtrace|verbose|pipefail)")
+    return on
+
+
+def _set_problem(args, text):
+    if _set_options(args) is None:
+        return (f"`{text}` may turn errexit off (allowed: `set` with -e -u -x -v or "
+                "-o errexit|nounset|xtrace|verbose|pipefail)")
     return None
 
 
@@ -681,6 +725,8 @@ def _simple_command_problem(cmd, src, in_function):
         return f"`{text}` can replace the script's exit status"
     if name == "alias":
         return f"`{text}` can redefine the check's command"
+    if name in ("shopt", "hash", "enable"):
+        return f"`{text}` can change shell options or which command a name runs"
     if name == "set":
         return _set_problem(args, text)
     return None
@@ -705,20 +751,22 @@ def _early_end(node, src, in_function=False):
     return None
 
 
-def _turns_errexit_on(parts):
-    if len(parts) != 1 or parts[0].kind != "command":
+def _turns_errexit_on(parts, backgrounded):
+    if backgrounded or len(parts) != 1 or parts[0].kind != "command":
         return False
     words = [p for p in parts[0].parts if p.kind == "word"]
     if not words or words[0].word != "set":
         return False
-    args = [w.word for w in words[1:] if _literal(w)]
-    return any(re.fullmatch(r"-[euxv]*e[euxv]*", a) for a in args) or any(
-        a == "-o" and b == "errexit" for a, b in zip(args, args[1:]))
+    on = _set_options(words[1:])
+    return bool(on and on & {"e", "errexit"})
 
 
 def _post_check_problem(body, pattern):
     """Why the check matching `pattern` in a %post body may not fail the
     build, or None. See the module docstring for the rule."""
+    if "{{" in body:
+        return ("%post contains `{{`: Apptainer substitutes `{{ VAR }}` build arguments "
+                "into the text before the shell runs it, so the parser cannot see the commands")
     nodes, problem = _parse_shell(body, "%post")
     if problem:
         return problem
@@ -731,7 +779,7 @@ def _post_check_problem(body, pattern):
     problem = _placement_problem(*statements[at], span, body)
     if problem:
         return problem
-    if not any(_turns_errexit_on(parts) for parts, _ in statements[:at]):
+    if not any(_turns_errexit_on(parts, bg) for parts, bg in statements[:at]):
         return "errexit is not on at the check: %post needs a top-level `set -e` before it"
     for parts, _ in statements[:at]:
         for node in parts:
@@ -749,8 +797,9 @@ def _run_check_problem(run, pattern):
     that _early_end rejects."""
     if not run.startswith("RUN "):
         return f"not a RUN instruction: {run[:40]!r}"
-    shell = run[len("RUN "):]
-    if shell.lstrip().startswith("["):
+    # BuildKit flags come before the command and are not part of the shell text.
+    shell = re.sub(r"^\s*(?:--[a-z-]+(?:=\S*)?\s+)*", "", run[len("RUN "):])
+    if shell.startswith("["):
         return "an exec-form RUN has no shell to check"
     nodes, problem = _parse_shell(shell, "the RUN instruction")
     if problem:
@@ -796,10 +845,18 @@ def _why_cannot_fail(text, name, pattern):
     """Why the check matching `pattern` in build file `text` may not fail the
     build, or None when a failing check fails it."""
     if name == "Dockerfile":
-        runs = [u for u in _join_continuations(text) if re.search(pattern, u)]
-        if len(runs) != 1:
-            return f"the check is in {len(runs)} Dockerfile instructions, not exactly one"
-        return _run_check_problem(runs[0], pattern)
+        units = _join_continuations(text)
+        at = [i for i, u in enumerate(units) if re.search(pattern, u)]
+        if len(at) != 1:
+            return f"the check is in {len(at)} Dockerfile instructions, not exactly one"
+        for u in units:
+            if re.match(r"SHELL\b", u, re.I) and not re.fullmatch(
+                    r'SHELL\s*\[\s*"/bin/sh"\s*,\s*"-c"\s*\]', u, re.I):
+                return f"the Dockerfile changes the RUN shell: {u[:60]!r}"
+        if any(re.match(r"FROM\b", u, re.I) for u in units[at[0]:]):
+            return ("the check is not in the final build stage; BuildKit skips stages the "
+                    "target does not need")
+        return _run_check_problem(units[at[0]], pattern)
     return _post_check_problem(_post_body(text), pattern)
 
 
@@ -996,6 +1053,11 @@ POST_BYPASSES = {
     "dot": ([". /tmp/x.sh", CHECK], "`\\. "),
     "alias": (["alias python3=true", CHECK], "`alias"),
     "function-shadows-python3": (["python3() { :; }", CHECK], "shadows"),
+    "set-o-noexec": (["set -o noexec", CHECK], "may turn errexit off"),
+    "shopt-errexit": (["shopt -u -o errexit", CHECK], "`shopt"),
+    "hash-p": (["hash -p /bin/true python3", CHECK], "`hash"),
+    "build-argument-template": (["{{ PREFLIGHT }}", CHECK], "`\\{\\{`"),
+    "other-pythonpath": (["PYTHONPATH=/tmp/shim " + CHECK], "shares its command"),
     "comment-ends-in-backslash": (["echo hi # trailing \\", "exit 0", CHECK], "`exit 0`"),
     "backslash-space": (["echo hi \\ ", "exit 0", CHECK], "`exit 0`"),
     # bashlex cannot read these, so the check is rejected rather than trusted
@@ -1032,6 +1094,12 @@ POST_HARMLESS = {
     "exec-redirect-only": ["exec >/tmp/post.log 2>&1", CHECK],
     "exec-fd-only": ["exec 3>&1", CHECK],
     "more-set-options": ["set -o pipefail", "set -eux", CHECK],
+    "combined-set-options": ["set -eo pipefail", "set -euo pipefail", CHECK],
+    "output-redirected": [CHECK + " >/dev/null"],
+    "stderr-redirected": [CHECK + " 2>&1"],
+    "redirect-before-check": [">>/tmp/check.log " + CHECK],
+    "quoted-heredoc-delimiter-with-dash": ["cat > /tmp/x.sh <<'EOF-X'", "set +e", "\nEOF-X", CHECK],
+    "quoted-heredoc-delimiter-with-dot": ['cat > /tmp/x.sh <<"END."', "exit 0", "\nEND.", CHECK],
     "command-v": ["command -v python3", CHECK],
     "command-v-exit": ["command -v exit", CHECK],
     "background-before": ["sleep 0 &", CHECK],
@@ -1056,6 +1124,12 @@ POST_FALSE_FAILURES = {
     # the check must occur in exactly one command, even when a second copy
     # sits where it never runs
     "check-twice": ([CHECK, "if false; then", CHECK, "fi"], "in 2 commands"),
+    # bashlex 0.18 does not implement arithmetic expansion
+    "arithmetic": (["i=$((1 + 1))", CHECK], "cannot parse"),
+    # a quoted heredoc delimiter with a shell metacharacter is not unquoted
+    "heredoc-delimiter-metachar": (["cat > /tmp/x <<'A;B'", "x", "\nA;B", CHECK], "cannot parse"),
+    # a heredoc on the check's own command feeds its stdin only
+    "heredoc-on-check": ([CHECK + " <<EOF", "x", "\nEOF"], "has a heredoc"),
     # only the listed `set` options are allowed
     "set-f": (["set -f", CHECK], "may turn errexit off"),
     # errexit applies inside a group, and a pipeline's status is its last
@@ -1109,6 +1183,13 @@ DOCKER_BYPASSES = {
     "negated": ("RUN ! " + CHECK, "`!` negation"),
     "background": ("RUN " + CHECK + " &", "`&`"),
     "if-false": ("RUN if false; then " + CHECK + "; fi", "`if` compound"),
+    "buildkit-flag-then-exit": ("RUN --network=default exit 0 && " + CHECK, "`exit 0`"),
+    "cmd-not-run": ("CMD " + CHECK, "not a RUN instruction"),
+    "exec-form": ('RUN ["/bin/sh", "-c", "' + CHECK.replace('"', '\\"') + '"]', "exec-form"),
+    "two-command-lines": ("RUN echo a\n" + CHECK, "more than one command line"),
+    "check-twice": ("RUN " + CHECK + " && " + CHECK, "in 2 commands"),
+    "heredoc": ("RUN cat <<EOF && " + CHECK + "\nx\nEOF", "has a heredoc"),
+    "other-pythonpath": ("RUN PYTHONPATH=/tmp/shim " + CHECK, "shares its command"),
     "child-shell": ("RUN sh -c '" + CHECK + "; true'", "shares its command"),
 }
 DOCKER_HARMLESS = {
@@ -1119,6 +1200,9 @@ DOCKER_HARMLESS = {
     "find-exec": "RUN find /opt/src -type f -exec chmod a+r {} + && " + CHECK,
     "exit-option": "RUN pytest --exitfirst --exec-timeout 1 && " + CHECK,
     "exit-after-check": "RUN " + CHECK + " && exit 0",
+    "buildkit-mount": "RUN --mount=type=cache,target=/root/.cache " + CHECK,
+    "buildkit-flags-then-chain": "RUN --network=none --security=sandbox echo a && " + CHECK,
+    "output-redirected": "RUN " + CHECK + " >/dev/null 2>&1 && echo done",
 }
 
 
@@ -1143,3 +1227,63 @@ def test_dockerfile_run_that_can_skip_the_check_cannot_pass(run, reason):
 def test_dockerfile_run_without_early_exit_passes(run):
     reason = _run_check_problem(run, re.escape(CHECK))
     assert reason is None, reason
+
+
+@pytest.mark.parametrize("edit, reason", [
+    (('RUN ', 'SHELL ["/bin/sh", "-c", "exit 0"]\nRUN '), "changes the RUN shell"),
+    (('RUN ', 'SHELL ["/bin/bash", "-c"]\nRUN '), "changes the RUN shell"),
+    (('RUN ', 'SHELL ["/bin/sh", "-c"]\nRUN '), None),
+    (("FROM ", "FROM ubuntu:22.04 AS unused\nFROM "), None),
+    ((None, "\nFROM scratch AS later\n"), "final build stage"),
+], ids=["shell-exit", "shell-bash", "shell-default", "earlier-stage", "later-stage"])
+def test_dockerfile_checks_run_with_the_default_shell_in_the_final_stage(edit, reason):
+    """A SHELL instruction changes what every later RUN runs, and BuildKit
+    skips a stage the target does not need, so the checks must sit in the
+    final stage under the default shell."""
+    old, new = edit
+    mutated = DOCKERFILE + new if old is None else DOCKERFILE.replace(old, new, 1)
+    for _, _, pattern in [c for c in BUILD_CHECKS if c[0] == "Dockerfile"]:
+        got = _why_cannot_fail(mutated, "Dockerfile", pattern)
+        if reason is None:
+            assert got is None, got
+        else:
+            assert got is not None and reason in got, got
+
+
+@pytest.mark.parametrize("lines, reason", [
+    (["set -o errexit", CHECK], None),
+    (["set -e &", CHECK], "errexit is not on"),
+    ([CHECK, "set -e"], "errexit is not on"),
+    (["set -u", CHECK], "errexit is not on"),
+], ids=["set-o-errexit", "set-e-backgrounded", "set-e-after-check", "set-u-only"])
+def test_post_errexit_must_be_turned_on_before_the_check(lines, reason):
+    body = "\n    ".join(["", "echo before"] + lines + ["echo after", ""])
+    got = _post_check_problem(body, re.escape(CHECK))
+    if reason is None:
+        assert got is None, got
+    else:
+        assert got is not None and reason in got, got
+
+
+FUSED_OPS_LINE = '    python3 -c "import torch, fireants_fused_ops'
+
+
+@pytest.mark.parametrize("line, reason", [
+    ("%startscript # run on instance start", "in 0 commands"),
+    ("%runscript -c /bin/bash", "in 0 commands"),
+    ("    {{ PREFLIGHT }}", "`{{`"),
+])
+def test_post_text_apptainer_does_not_run_as_post_cannot_pass(line, reason):
+    """A line whose first word starts with `%` ends %post for Apptainer, so
+    the check below it is no longer part of the build; `{{ }}` is replaced
+    before the shell sees it."""
+    assert SINGULARITY.count(FUSED_OPS_LINE) == 1
+    mutated = SINGULARITY.replace(FUSED_OPS_LINE, line + "\n" + FUSED_OPS_LINE)
+    got = _why_cannot_fail(mutated, "Singularity", FUSED_OPS_ASSERTION_CMD)
+    assert got is not None and reason in got, got
+
+
+def test_post_redirect_between_the_check_s_words_is_not_the_check_alone():
+    body = _post_body_with(['python3 >/dev/null -c "import sys; sys.exit(0)"'])
+    got = _post_check_problem(body, re.escape('"import sys; sys.exit(0)"'))
+    assert got is not None and "shares its command" in got, got
