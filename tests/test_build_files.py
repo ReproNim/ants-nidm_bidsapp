@@ -8,6 +8,10 @@ Each `python3 -c` build check must be able to fail the build. The recipes are
 read with bashlex (a shell parser, test-only dependency), and a check passes
 only under these rules:
 
+Both recipes must be plain ASCII whose only control characters are newline
+and tab (no BOM, \\r, \\f, \\v, 0x85 or 0xA0): Apptainer and BuildKit split
+lines on newline alone and treat other bytes as spaces where Python does not.
+
 Singularity %post (Apptainer runs it as `/bin/sh -ex`; the rule still asks for
 `set -e` in the recipe). Sections are read as Apptainer's definition-file
 parser reads them: a section starts at any line whose first word starts with
@@ -42,12 +46,13 @@ Dockerfile RUN (run by sh -c, no errexit): the instruction is the check alone
 or a `&&` chain of simple commands that includes it, with no heredoc, and the
 commands before the check pass the same "nothing before" rule. Instructions
 are read as BuildKit reads them: names in any case, a continuation `\\`
-joining the next line with nothing in between. Leading BuildKit flags
+joining the next line with nothing in between (a line ending in `\\\\` is not a
+continuation). Leading BuildKit flags
 (`--mount=`, `--network=`, `--security=`) are dropped before parsing when they
 are plain `--name=value` words; a bare `--`, a valueless flag, or a flag with
 a quote or backslash is rejected. The Dockerfile may have no heredoc in a
-RUN, COPY or ADD instruction and no parser directive (`# syntax=`,
-`# escape=`, `# check=`). It may have no SHELL instruction other
+RUN, COPY or ADD instruction and no parser directive (`syntax`, `escape` or
+`check` after `#` or `//`, in any case). It may have no SHELL instruction other
 than the default `SHELL ["/bin/sh", "-c"]`, and every check must sit in the
 final build stage (after the last FROM): BuildKit skips stages the target does
 not need, and the tests do not follow stage dependencies.
@@ -131,7 +136,7 @@ def _template_problem(text):
     The recipe uses it only for a label value, which is all that is allowed:
     inside %labels, after the label name."""
     section = None
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if re.match(SECTION_START, line):
             section = line.strip()[1:].split()[0].lower()
             if "{{" in line:
@@ -177,12 +182,14 @@ def _docker_instructions(text):
     lines dropped, and a line ending in `\\` (plus trailing blanks) joined to
     the next line as it stands, with nothing added in between."""
     out, cur = [], None
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         if cur is None:
             line = line.lstrip()
-        cont = re.search(r"\\[ \t]*$", line)
+        # BuildKit: a final `\\` continues the line only when the character
+        # before it is not another `\\` (so `x\\\\` ends the instruction).
+        cont = re.search(r"(?<!\\)\\[ \t]*$", line)
         piece = line[:cont.start()] if cont else line
         cur = piece if cur is None else cur + piece
         if not cont:
@@ -884,7 +891,7 @@ def _run_check_problem(run, pattern):
     # `--name=value` flags are stripped here, anything else is rejected.
     while shell.startswith("--"):
         flag = re.match(r"\S+", shell).group(0)
-        if not re.fullmatch(r"""--[a-z][a-z-]*=[^\s\\'"]+""", flag):
+        if not re.fullmatch(r"--[a-z][a-z-]*=[A-Za-z0-9_./,:=@+-]+", flag):
             return (f"RUN flag {flag!r} is not a plain --name=value; BuildKit parses `--`, "
                     "quotes and escapes in flags differently")
         shell = shell[len(flag):].lstrip()
@@ -930,11 +937,28 @@ def _walk(node):
         yield from _walk(child)
 
 
+def _charset_problem(text, name):
+    """Both recipes must be plain ASCII whose only control characters are
+    newline and tab. Apptainer and BuildKit split lines on newline alone and
+    treat other bytes (a BOM, \\r, \\f, \\v, 0x85, 0xA0) as spaces or text in
+    ways that differ from Python's, so anything else is rejected."""
+    for i, c in enumerate(text):
+        if not (c in "\n\t" or " " <= c <= "~"):
+            line = text.count("\n", 0, i) + 1
+            return (f"{name} line {line} has {c!r} (U+{ord(c):04X}); the recipes must be plain "
+                    "ASCII with no control characters other than newline and tab")
+    return None
+
+
 def _why_cannot_fail(text, name, pattern):
     """Why the check matching `pattern` in build file `text` may not fail the
     build, or None when a failing check fails it."""
+    problem = _charset_problem(text, name)
+    if problem:
+        return problem
     if name == "Dockerfile":
-        directive = re.search(r"^[ \t]*#[ \t]*(syntax|escape|check)[ \t]*=.*$", text, re.M | re.I)
+        # BuildKit reads directives after `#` or `//`, with any whitespace.
+        directive = re.search(r"^\s*(#|//)\s*(syntax|escape|check)\s*=.*$", text, re.M | re.I)
         if directive:
             return (f"the Dockerfile has a parser directive ({directive.group(0).strip()!r}), "
                     "which changes how it is read")
@@ -1477,3 +1501,89 @@ def test_singularity_section_ends_at_a_header_with_arguments():
     assert mutated != SINGULARITY
     assert _singularity_section("runscript", mutated) == []
     assert _singularity_section("startscript", mutated) == [CONSOLE_SCRIPT]
+
+
+@pytest.mark.parametrize("text, name", BUILD_FILES, ids=BUILD_IDS)
+def test_recipes_are_plain_ascii(text, name):
+    assert _charset_problem(text, name) is None
+
+
+CONVERTER_RUN_CHECK = '    python3 -c "import importlib.metadata as m'
+
+
+@pytest.mark.parametrize("name, mutate, reason", [
+    ("Dockerfile", lambda t: "﻿" + t, "U+FEFF"),
+    ("Dockerfile", lambda t: t.replace(CONVERTER_RUN_CHECK, "#\f" + CONVERTER_RUN_CHECK, 1), "U+000C"),
+    ("Dockerfile", lambda t: t.replace("\n", "\r\n"), "U+000D"),
+    ("Dockerfile", lambda t: t.replace("RUN pip3 install -r requirements.txt",
+                                        "RUN --mount=type=tmpfs,target=/xŅexit 0 && pip3 install -r requirements.txt", 1),
+     "U+0145"),
+    ("Dockerfile", lambda t: t.replace("FROM ", "#\vsyntax=example.org/f:1\nFROM ", 1), "U+000B"),
+    ("Dockerfile", lambda t: t.replace("FROM ", "# note\x85\nFROM ", 1), "U+0085"),
+    ("Dockerfile", lambda t: t.replace("FROM ", "#\xa0\nFROM ", 1), "U+00A0"),
+    ("Singularity", lambda t: t.replace("%environment\n", "%environment\n    # x\f%labels\f\n"
+                                         "    export SEE_ALSO={{ GIT_COMMIT }}\n", 1), "U+000C"),
+    ("Singularity", lambda t: "﻿" + t, "U+FEFF"),
+    ("Singularity", lambda t: t.replace("# Fail the build", "# Faïl the build", 1), "U+00EF"),
+], ids=["bom", "formfeed-comment", "crlf", "non-ascii-flag", "vtab-directive", "nel", "nbsp",
+        "formfeed-fake-labels", "singularity-bom", "singularity-non-ascii"])
+def test_recipe_characters_outside_plain_ascii_are_rejected(name, mutate, reason):
+    text = DOCKERFILE if name == "Dockerfile" else SINGULARITY
+    mutated = mutate(text)
+    assert mutated != text
+    pattern = FUSED_OPS_ASSERTION_CMD
+    got = _why_cannot_fail(mutated, name, pattern)
+    assert got is not None and reason in got and "plain ASCII" in got, got
+
+
+@pytest.mark.parametrize("line", [
+    "// syntax=docker.io/example/frontend:1", "# SYNTAX=docker.io/example/frontend:1",
+    "#syntax = x", "# check=error=true", "//escape=`"])
+def test_dockerfile_parser_directive_spellings_are_rejected(line):
+    got = _why_cannot_fail(line + "\n" + DOCKERFILE, "Dockerfile", FUSED_OPS_ASSERTION_CMD)
+    assert got is not None and "parser directive" in got, got
+
+
+def test_dockerfile_line_ending_in_two_backslashes_ends_the_instruction():
+    """`x\\` is not a continuation for BuildKit, so the check line below it
+    is a separate (here ENV) instruction and never runs in the RUN."""
+    mutated = DOCKERFILE.replace("    cd / && rm -rf /tmp/fireants-src && \\\n",
+                                 "    cd / && rm -rf /tmp/fireants-src && echo x\\\\\n", 1)
+    mutated = mutated.replace(FUSED_RUN_CHECK, "ENV y && " + FUSED_RUN_CHECK.lstrip(), 1)
+    assert mutated.count("echo x\\\\\nENV y") == 1
+    got = _why_cannot_fail(mutated, "Dockerfile", FUSED_OPS_ASSERTION_CMD)
+    assert got is not None and "not a RUN instruction" in got, got
+    assert _docker_instructions("RUN a\\\\\nRUN b\\\nc\n") == ["RUN a\\\\", "RUN bc"]
+
+
+@pytest.mark.parametrize("insert", [
+    "RUN cat > /tmp/x <<EOF\nhi\nEOF\n",
+    "ADD <<EOF /tmp/x\nhi\nEOF\n",
+    "run cat > /tmp/x <<EOF\nhi\nEOF\n",
+    "copy <<EOF /tmp/x\nhi\nEOF\n",
+], ids=["run", "add", "lowercase-run", "lowercase-copy"])
+def test_dockerfile_heredoc_in_any_instruction_is_rejected(insert):
+    mutated = DOCKERFILE.replace("ENV ANTSPATH", insert + "ENV ANTSPATH", 1)
+    assert mutated != DOCKERFILE
+    got = _why_cannot_fail(mutated, "Dockerfile", CONVERTER_IMPORT_CHECK)
+    assert got is not None and "has a heredoc" in got, got
+
+
+def test_template_in_the_middle_of_a_line_outside_labels_is_rejected():
+    mutated = SINGULARITY.replace("%help\n", "%help\n    see {{ X }}\n", 1)
+    got = _why_cannot_fail(mutated, "Singularity", FUSED_OPS_ASSERTION_CMD)
+    assert got is not None and "outside a %labels value" in got, got
+
+
+def test_singularity_sections_with_the_same_name_are_merged():
+    mutated = SINGULARITY + "%runscript\n    echo second\n"
+    assert _singularity_section("runscript", mutated) == [CONSOLE_SCRIPT, "echo second"]
+
+
+def test_helpers_split_lines_and_flags_as_the_build_tools_do():
+    """The character rule above rejects these first; the helpers still read
+    them as BuildKit and Apptainer do, so dropping that rule leaves no gap."""
+    assert _docker_instructions("# a\fRUN exit 0\nRUN b\n") == ["RUN b"]
+    assert _template_problem("%environment\n    # x\f%labels\f\n    export A={{ X }}\n")
+    got = _run_check_problem("RUN --mount=type=tmpfs,target=/xŅexit 0 && " + CHECK, re.escape(CHECK))
+    assert got is not None and "not a plain --name=value" in got, got
