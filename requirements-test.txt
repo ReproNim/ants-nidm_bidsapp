@@ -8,3 +8,6 @@ torch>=2.3.0
 # the highest available release instead.
 fireants==1.5.0
 SimpleITK>=2.2.1
+# Shell parser for tests/test_build_files.py, which checks the structure
+# around the build checks in Singularity and the Dockerfile. Tests only.
+bashlex==0.18

@@ -136,6 +136,12 @@ Markers (`pytest.ini`): `requires_fireants` needs `fireants` and `torch`
 importable and runs on CPU; `ci_incompatible` needs a full ANTs and template
 environment.
 
+`tests/test_build_files.py` parses the Singularity `%post` and the Dockerfile
+`RUN` instructions with bashlex (pinned in `requirements-test.txt`, tests
+only) to check that every `python3 -c` build check can fail the build. Its
+module docstring states the rule. A construct bashlex cannot parse (`case`,
+`time`) makes those tests fail rather than pass unchecked.
+
 GPU checks, run as Slurm jobs against a built image:
 
 - `scripts/tier2_smoke.sbatch <sif> <bids> <out> <participant>` runs one
