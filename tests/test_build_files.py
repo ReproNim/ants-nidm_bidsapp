@@ -9,11 +9,14 @@ read with bashlex (a shell parser, test-only dependency), and a check passes
 only under these rules:
 
 Singularity %post (Apptainer runs it as `/bin/sh -ex`; the rule still asks for
-`set -e` in the recipe). %post ends at the next line whose first word starts
-with `%`, as Apptainer's definition-file parser reads it, header arguments and
-comments included (`%runscript -c /bin/bash`, `%startscript # x`). %post may
-not contain `{{`: Apptainer substitutes `{{ VAR }}` build arguments into the
-text before any shell sees it.
+`set -e` in the recipe). Sections are read as Apptainer's definition-file
+parser reads them: a section starts at any line whose first word starts with
+`%`, header arguments and comments included (`%runscript -c /bin/bash`,
+`%startscript # x`); its name is the first word after `%`, in any case; and
+sections with the same name are merged in file order. The recipe must have
+exactly one %post header, with nothing after it but an optional comment (no
+`-c <program>`). Apptainer substitutes `{{ VAR }}` build arguments over the
+whole file before reading it, so `{{` may appear only in a %labels value.
 - The check is a top-level simple command of %post: not inside an
   if/while/until/for/case compound, a `{ }` group, a `( )` subshell or a
   function body; not an operand of `&&`, `||`, `|` or `!`; not run with `&`;
@@ -37,9 +40,14 @@ text before any shell sees it.
 
 Dockerfile RUN (run by sh -c, no errexit): the instruction is the check alone
 or a `&&` chain of simple commands that includes it, with no heredoc, and the
-commands before the check pass the same "nothing before" rule. Leading
-BuildKit flags (`--mount=`, `--network=`, `--security=`) are dropped before
-parsing, as Docker does. The Dockerfile may have no SHELL instruction other
+commands before the check pass the same "nothing before" rule. Instructions
+are read as BuildKit reads them: names in any case, a continuation `\\`
+joining the next line with nothing in between. Leading BuildKit flags
+(`--mount=`, `--network=`, `--security=`) are dropped before parsing when they
+are plain `--name=value` words; a bare `--`, a valueless flag, or a flag with
+a quote or backslash is rejected. The Dockerfile may have no heredoc in a
+RUN, COPY or ADD instruction and no parser directive (`# syntax=`,
+`# escape=`, `# check=`). It may have no SHELL instruction other
 than the default `SHELL ["/bin/sh", "-c"]`, and every check must sit in the
 final build stage (after the last FROM): BuildKit skips stages the target does
 not need, and the tests do not follow stage dependencies.
@@ -52,7 +60,14 @@ structure; it cannot rule these out without rejecting lines the recipe needs.
 The rules fail closed: bashlex 0.18 does not parse `case`, `time`, `select`,
 `coproc` or arithmetic expansion (`$((...))`, `$[...]`), and needs quoted
 heredoc delimiters unquoted first, which the tests do for delimiters free of
-shell metacharacters. A recipe it cannot parse fails with bashlex's message. The rules were checked against
+shell metacharacters. A recipe it cannot parse fails with bashlex's message.
+
+Other safe forms rejected on purpose, each pinned by a test where it matters:
+`{ check; }`, `true | check`, `out="$(check)"`, a heredoc on the check, a
+function that runs its arguments, `exit "$rc"`, `set -f`, the check twice; in
+the Dockerfile `true; check`, `(check)`, `if true; then check; fi`, a flag
+value with quotes or spaces; and `{{ }}` in a comment line (Apptainer skips
+templating there), a quoted heredoc delimiter starting with `#`. The rules were checked against
 `bash --posix -e`; the image's /bin/sh is dash, which uses the same POSIX
 errexit, exit and trap semantics.
 """
@@ -94,22 +109,88 @@ FUSED_OPS_ASSERTION_CMD = r'python3 -c "import torch, fireants_fused_ops'
 SECTION_START = r"^[ \t]*%\S"
 
 
+def _sections(text):
+    """A definition file's sections as Apptainer reads them, in file order:
+    (name, header arguments, body). The name is the first word after `%`,
+    lowercased; Apptainer merges sections that share a name."""
+    heads = list(re.finditer(SECTION_START + r".*$", text, re.MULTILINE))
+    out = []
+    for i, head in enumerate(heads):
+        name, _, args = head.group(0).strip()[1:].partition(" ")
+        # A tab is not a separator for Apptainer; splitting on it here too
+        # makes `%post<TAB>-c x` a %post header with arguments, which is rejected.
+        name, _, more = name.partition("\t")
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        out.append((name.lower(), (more + " " + args).strip(), text[head.end():end]))
+    return out
+
+
+def _template_problem(text):
+    """Apptainer replaces `{{ VAR }}` across the whole file before reading
+    it, so a substituted line could become a section header or a command.
+    The recipe uses it only for a label value, which is all that is allowed:
+    inside %labels, after the label name."""
+    section = None
+    for line in text.splitlines():
+        if re.match(SECTION_START, line):
+            section = line.strip()[1:].split()[0].lower()
+            if "{{" in line:
+                return f"a section header uses `{{{{ }}}}` substitution: {line.strip()!r}"
+            continue
+        if "{{" in line and (section != "labels" or "{{" in line.split()[0]):
+            return (f"`{{{{` outside a %labels value: {line.strip()!r}; Apptainer substitutes "
+                    "build arguments before parsing, so the tests cannot see the result")
+    return None
+
+
+def _post_section(text):
+    """(%post body, None), or (None, why the recipe's %post cannot be read)."""
+    posts = [sec for sec in _sections(text) if sec[0] == "post"]
+    if len(posts) != 1:
+        return None, (f"the recipe has {len(posts)} %post sections; Apptainer runs every one, "
+                      "merged in file order, so there must be exactly one")
+    _, args, body = posts[0]
+    if args and not args.startswith("#"):
+        return None, (f"the %post header has arguments ({args!r}); `-c` would run %post "
+                      "through another program")
+    problem = _template_problem(text)
+    if problem:
+        return None, problem
+    return body, None
+
+
 def _post_body(text=None):
     """The raw text of Singularity's %post section."""
-    text = SINGULARITY if text is None else text
-    # Anchor on the section header at the start of a line: "%post" also occurs
-    # in prose inside the header comment.
-    post = re.search(r"^%post\s*$", text, re.MULTILINE)
-    assert post, "Singularity has no %post section"
-    rest = text[post.end():]
-    nxt = re.search(SECTION_START, rest, re.MULTILINE)
-    return rest[: nxt.start()] if nxt else rest
+    body, problem = _post_section(SINGULARITY if text is None else text)
+    assert problem is None, problem
+    return body
 
 
 def _post_statements():
     """Non-blank, non-comment lines of Singularity's %post, stripped, with
     `\\`-continuation lines joined into the line they continue."""
     return _join_continuations(_post_body())
+
+
+def _docker_instructions(text):
+    """Dockerfile instructions as BuildKit reads them: blank and comment
+    lines dropped, and a line ending in `\\` (plus trailing blanks) joined to
+    the next line as it stands, with nothing added in between."""
+    out, cur = [], None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if cur is None:
+            line = line.lstrip()
+        cont = re.search(r"\\[ \t]*$", line)
+        piece = line[:cont.start()] if cont else line
+        cur = piece if cur is None else cur + piece
+        if not cont:
+            out.append(cur.rstrip())
+            cur = None
+    if cur is not None:
+        out.append(cur)
+    return out
 
 
 def _join_continuations(text):
@@ -372,13 +453,12 @@ def test_no_text_says_the_converter_declares_pynidm_4_5():
             assert not re.search(claim, text, re.IGNORECASE), (path, claim)
 
 
-def _singularity_section(name):
-    """Non-blank, non-comment lines of a Singularity section, stripped."""
-    head = re.search(rf"^%{name}\s*$", SINGULARITY, re.MULTILINE)
-    assert head, f"Singularity has no %{name} section"
-    rest = SINGULARITY[head.end():]
-    nxt = re.search(SECTION_START, rest, re.MULTILINE)
-    return _commands(rest[: nxt.start()] if nxt else rest)
+def _singularity_section(name, text=None):
+    """Non-blank, non-comment lines of a Singularity section (all sections of
+    that name, merged as Apptainer does), stripped."""
+    bodies = [body for sec, _, body in _sections(SINGULARITY if text is None else text) if sec == name]
+    assert bodies, f"Singularity has no %{name} section"
+    return _commands("".join(bodies))
 
 
 CONSOLE_SCRIPT = 'exec ants-nidm "$@"'
@@ -508,7 +588,7 @@ CHECK_NAME = "python3"
 def _check_unit(name, pattern):
     """The text of the instruction or %post command line holding a check,
     continuation lines joined."""
-    units = _join_continuations(DOCKERFILE) if name == "Dockerfile" else _post_statements()
+    units = _docker_instructions(DOCKERFILE) if name == "Dockerfile" else _post_statements()
     found = [u for u in units if re.search(pattern, u)]
     assert len(found) == 1, (name, pattern, found)
     return found[0]
@@ -795,10 +875,19 @@ def _run_check_problem(run, pattern):
     runs without errexit, so the instruction must be the check alone or a
     `&&` chain of simple commands that includes it, with nothing before it
     that _early_end rejects."""
-    if not run.startswith("RUN "):
+    head = re.match(r"RUN\s+", run, re.I)
+    if not head:
         return f"not a RUN instruction: {run[:40]!r}"
-    # BuildKit flags come before the command and are not part of the shell text.
-    shell = re.sub(r"^\s*(?:--[a-z-]+(?:=\S*)?\s+)*", "", run[len("RUN "):])
+    shell = run[head.end():]
+    # BuildKit flags come before the command and are not part of the shell
+    # text. BuildKit's flag parser honours `--`, quotes and `\\`; only plain
+    # `--name=value` flags are stripped here, anything else is rejected.
+    while shell.startswith("--"):
+        flag = re.match(r"\S+", shell).group(0)
+        if not re.fullmatch(r"""--[a-z][a-z-]*=[^\s\\'"]+""", flag):
+            return (f"RUN flag {flag!r} is not a plain --name=value; BuildKit parses `--`, "
+                    "quotes and escapes in flags differently")
+        shell = shell[len(flag):].lstrip()
     if shell.startswith("["):
         return "an exec-form RUN has no shell to check"
     nodes, problem = _parse_shell(shell, "the RUN instruction")
@@ -845,7 +934,15 @@ def _why_cannot_fail(text, name, pattern):
     """Why the check matching `pattern` in build file `text` may not fail the
     build, or None when a failing check fails it."""
     if name == "Dockerfile":
-        units = _join_continuations(text)
+        directive = re.search(r"^[ \t]*#[ \t]*(syntax|escape|check)[ \t]*=.*$", text, re.M | re.I)
+        if directive:
+            return (f"the Dockerfile has a parser directive ({directive.group(0).strip()!r}), "
+                    "which changes how it is read")
+        units = _docker_instructions(text)
+        for u in units:
+            if re.match(r"(RUN|COPY|ADD)\s.*<<", u, re.I | re.S):
+                return (f"the Dockerfile has a heredoc ({u[:50]!r}); its body is not "
+                        "instructions, and the tests do not follow it")
         at = [i for i, u in enumerate(units) if re.search(pattern, u)]
         if len(at) != 1:
             return f"the check is in {len(at)} Dockerfile instructions, not exactly one"
@@ -857,16 +954,18 @@ def _why_cannot_fail(text, name, pattern):
             return ("the check is not in the final build stage; BuildKit skips stages the "
                     "target does not need")
         return _run_check_problem(units[at[0]], pattern)
-    return _post_check_problem(_post_body(text), pattern)
+    body, problem = _post_section(text)
+    return problem or _post_check_problem(body, pattern)
 
 
 def test_build_files_parse_with_bashlex():
     """The checks below fail closed when bashlex cannot parse a recipe, so
     the recipes as they stand must parse."""
     assert _parse_shell(_post_body(), "%post")[1] is None
-    for unit in _join_continuations(DOCKERFILE):
-        if unit.startswith("RUN "):
-            assert _parse_shell(unit[4:], unit[:40])[1] is None, unit
+    for unit in _docker_instructions(DOCKERFILE):
+        head = re.match(r"RUN\s+", unit, re.I)
+        if head:
+            assert _parse_shell(unit[head.end():], unit[:40])[1] is None, unit
 
 
 @pytest.mark.parametrize("name, check, pattern", BUILD_CHECKS,
@@ -1056,6 +1155,7 @@ POST_BYPASSES = {
     "set-o-noexec": (["set -o noexec", CHECK], "may turn errexit off"),
     "shopt-errexit": (["shopt -u -o errexit", CHECK], "`shopt"),
     "hash-p": (["hash -p /bin/true python3", CHECK], "`hash"),
+    "enable-n": (["enable -n set", CHECK], "`enable"),
     "build-argument-template": (["{{ PREFLIGHT }}", CHECK], "`\\{\\{`"),
     "other-pythonpath": (["PYTHONPATH=/tmp/shim " + CHECK], "shares its command"),
     "comment-ends-in-backslash": (["echo hi # trailing \\", "exit 0", CHECK], "`exit 0`"),
@@ -1184,6 +1284,10 @@ DOCKER_BYPASSES = {
     "background": ("RUN " + CHECK + " &", "`&`"),
     "if-false": ("RUN if false; then " + CHECK + "; fi", "`if` compound"),
     "buildkit-flag-then-exit": ("RUN --network=default exit 0 && " + CHECK, "`exit 0`"),
+    "buildkit-double-dash": ("RUN -- exit 0 && " + CHECK, "not a plain --name=value"),
+    "buildkit-escaped-flag": ("RUN --mount=type=tmpfs,target=/a\\ echo exit 0 && " + CHECK, "not a plain --name=value"),
+    "buildkit-quoted-flag": ('RUN --mount=type=bind,source="a b",target=/x ' + CHECK, "not a plain --name=value"),
+    "buildkit-valueless-flag": ("RUN --network exit 0 && " + CHECK, "not a plain --name=value"),
     "cmd-not-run": ("CMD " + CHECK, "not a RUN instruction"),
     "exec-form": ('RUN ["/bin/sh", "-c", "' + CHECK.replace('"', '\\"') + '"]', "exec-form"),
     "two-command-lines": ("RUN echo a\n" + CHECK, "more than one command line"),
@@ -1201,6 +1305,8 @@ DOCKER_HARMLESS = {
     "exit-option": "RUN pytest --exitfirst --exec-timeout 1 && " + CHECK,
     "exit-after-check": "RUN " + CHECK + " && exit 0",
     "buildkit-mount": "RUN --mount=type=cache,target=/root/.cache " + CHECK,
+    "lowercase-run": "run " + CHECK,
+    "tab-after-run": "RUN\t" + CHECK,
     "buildkit-flags-then-chain": "RUN --network=none --security=sandbox echo a && " + CHECK,
     "output-redirected": "RUN " + CHECK + " >/dev/null 2>&1 && echo done",
 }
@@ -1232,10 +1338,13 @@ def test_dockerfile_run_without_early_exit_passes(run):
 @pytest.mark.parametrize("edit, reason", [
     (('RUN ', 'SHELL ["/bin/sh", "-c", "exit 0"]\nRUN '), "changes the RUN shell"),
     (('RUN ', 'SHELL ["/bin/bash", "-c"]\nRUN '), "changes the RUN shell"),
+    (('RUN ', 'shell ["/bin/sh", "-c", "exit 0"]\nRUN '), "changes the RUN shell"),
     (('RUN ', 'SHELL ["/bin/sh", "-c"]\nRUN '), None),
     (("FROM ", "FROM ubuntu:22.04 AS unused\nFROM "), None),
     ((None, "\nFROM scratch AS later\n"), "final build stage"),
-], ids=["shell-exit", "shell-bash", "shell-default", "earlier-stage", "later-stage"])
+    ((None, "\nfrom scratch AS later\n"), "final build stage"),
+], ids=["shell-exit", "shell-bash", "shell-lowercase", "shell-default", "earlier-stage", "later-stage",
+        "later-stage-lowercase"])
 def test_dockerfile_checks_run_with_the_default_shell_in_the_final_stage(edit, reason):
     """A SHELL instruction changes what every later RUN runs, and BuildKit
     skips a stage the target does not need, so the checks must sit in the
@@ -1287,3 +1396,84 @@ def test_post_redirect_between_the_check_s_words_is_not_the_check_alone():
     body = _post_body_with(['python3 >/dev/null -c "import sys; sys.exit(0)"'])
     got = _post_check_problem(body, re.escape('"import sys; sys.exit(0)"'))
     assert got is not None and "shares its command" in got, got
+
+
+POST_HEADER = "%post\n    # Fail the build"
+FUSED_RUN = "RUN git clone --depth 1"
+FUSED_RUN_CHECK = "    python3 -c \"import torch, fireants_fused_ops; print('fused ops OK')\""
+
+
+def _singularity_with(edit):
+    if edit == "template-header":
+        # a build argument that expands to a %post header at the end of the file
+        return (SINGULARITY.replace("    GIT_COMMIT=unknown\n",
+                                    "    GIT_COMMIT=unknown\n    TAIL=%post -c /bin/true\n", 1)
+                + "{{ TAIL }}\n")
+    old, new = edit
+    assert SINGULARITY.count(old) == 1, old
+    return SINGULARITY.replace(old, new)
+
+
+@pytest.mark.parametrize("edit, reason", [
+    ((POST_HEADER, POST_HEADER), None),
+    (("%help\n", "%post -c /bin/true\n%help\n"), "2 %post sections"),
+    ((POST_HEADER, "%POST\n    exit 0\n" + POST_HEADER), "2 %post sections"),
+    ((POST_HEADER, "%post # prep\n    exit 0\n" + POST_HEADER), "2 %post sections"),
+    ("template-header", "`{{` outside a %labels value"),
+    ((POST_HEADER, POST_HEADER.replace("%post", "%post -c /bin/bash")), "header has arguments"),
+    ((POST_HEADER, POST_HEADER.replace("%post", "%post\t-c /bin/true")), "header has arguments"),
+    ((POST_HEADER, POST_HEADER.replace("%post", "%post # build steps")), None),
+    ((POST_HEADER, POST_HEADER.replace("%post", "%Post")), None),
+    (("%help\n", "%help\n    {{ X }} in a help line\n"), "`{{` outside a %labels value"),
+    (("%labels\n", "%labels\n    {{ X }}\n"), "`{{` outside a %labels value"),
+    (("%labels\n", "%labels {{ X }}\n"), "section header uses"),
+], ids=["unchanged", "second-post-with-c", "uppercase-second-post", "commented-second-post",
+        "template-expands-to-header", "post-c-bash", "post-tab-c", "post-comment", "post-mixed-case",
+        "template-in-help", "template-as-label-name", "template-in-header"])
+def test_singularity_post_is_read_as_apptainer_reads_it(edit, reason):
+    """Apptainer names sections case-insensitively, merges every %post in file
+    order, takes `-c <program>` from a header, and substitutes `{{ VAR }}`
+    over the whole file first."""
+    mutated = _singularity_with(edit)
+    for pattern in (FUSED_OPS_ASSERTION_CMD, CONVERTER_IMPORT_CHECK):
+        got = _why_cannot_fail(mutated, "Singularity", pattern)
+        if reason is None:
+            assert got is None, got
+        else:
+            assert got is not None and reason in got, got
+
+
+@pytest.mark.parametrize("edit, reason", [
+    ((FUSED_RUN, "run\t" + FUSED_RUN[4:]), None),
+    ((FUSED_RUN, "RUN -- exit 0 && " + FUSED_RUN[4:]), "not a plain --name=value"),
+    ((FUSED_RUN, "RUN --mount=type=tmpfs,target=/a\\ echo exit 0 && " + FUSED_RUN[4:]), "not a plain --name=value"),
+    ((FUSED_RUN, "RUN ex\\\nit 0 && " + FUSED_RUN[4:]), "`exit 0`"),
+    ((FUSED_RUN, "COPY <<EOF /tmp/unused.txt\n" + FUSED_RUN), "heredoc"),
+    (("FROM ", "# syntax=example.org/frontend:1\nFROM "), "parser directive"),
+    (("FROM ", "# escape=`\nFROM "), "parser directive"),
+], ids=["lowercase-run-tab", "double-dash", "escaped-flag", "split-exit", "copy-heredoc",
+        "syntax-directive", "escape-directive"])
+def test_dockerfile_is_read_as_buildkit_reads_it(edit, reason):
+    old, new = edit
+    assert DOCKERFILE.count(old) == 1, old
+    mutated = DOCKERFILE.replace(old, new)
+    if "COPY <<EOF" in new:
+        mutated = mutated.replace(FUSED_RUN_CHECK, FUSED_RUN_CHECK + "\nEOF", 1)
+    got = _why_cannot_fail(mutated, "Dockerfile", FUSED_OPS_ASSERTION_CMD)
+    if reason is None:
+        assert got is None, got
+    else:
+        assert got is not None and reason in got, got
+
+
+def test_dockerfile_continuation_adds_nothing_between_lines():
+    assert _docker_instructions("RUN ex\\\nit 0 && \\\n    true\n# c\nCMD x\n") == [
+        "RUN exit 0 &&     true", "CMD x"]
+
+
+def test_singularity_section_ends_at_a_header_with_arguments():
+    """A section ends at any line whose first word starts with `%`."""
+    mutated = SINGULARITY.replace("%runscript\n", "%runscript\n%startscript -x # y\n", 1)
+    assert mutated != SINGULARITY
+    assert _singularity_section("runscript", mutated) == []
+    assert _singularity_section("startscript", mutated) == [CONSOLE_SCRIPT]
