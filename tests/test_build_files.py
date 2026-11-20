@@ -1569,6 +1569,13 @@ def test_carriage_return_on_disk_is_rejected(tmp_path, name, check):
     assert got is not None and "U+000D" in got, got
 
 
+@pytest.mark.parametrize("name", ["Dockerfile", "Singularity"])
+def test_recipe_files_on_disk_have_no_carriage_return(name):
+    """Checks the stored bytes, not the text the module read, so it holds
+    whichever way the recipes are read."""
+    assert b"\r" not in (ROOT / name).read_bytes()
+
+
 def test_dockerfile_continuation_allows_trailing_blanks():
     """BuildKit continues a line whose final `\\` is followed only by spaces
     or tabs, so `exit 0 && \\ ` joins the next line into the same RUN."""
