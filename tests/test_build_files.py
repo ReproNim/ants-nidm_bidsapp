@@ -83,8 +83,17 @@ import bashlex
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-DOCKERFILE = (ROOT / "Dockerfile").read_text()
-SINGULARITY = (ROOT / "Singularity").read_text()
+
+
+def _read_recipe(path):
+    """A recipe's text exactly as stored. `read_text()` turns \\r and \\r\\n
+    into newlines, which would hide a \\r from the character rule below
+    while BuildKit and Apptainer still see it."""
+    return path.read_bytes().decode("utf-8")
+
+
+DOCKERFILE = _read_recipe(ROOT / "Dockerfile")
+SINGULARITY = _read_recipe(ROOT / "Singularity")
 REQUIREMENTS = (ROOT / "requirements.txt").read_text()
 
 BUILD_FILES = [(DOCKERFILE, "Dockerfile"), (SINGULARITY, "Singularity")]
@@ -1542,6 +1551,28 @@ def test_recipe_characters_outside_plain_ascii_are_rejected(name, mutate, reason
 def test_dockerfile_parser_directive_spellings_are_rejected(line):
     got = _why_cannot_fail(line + "\n" + DOCKERFILE, "Dockerfile", FUSED_OPS_ASSERTION_CMD)
     assert got is not None and "parser directive" in got, got
+
+
+@pytest.mark.parametrize("name, check", [
+    ("Dockerfile", CONVERTER_RUN_CHECK),
+    ("Singularity", FUSED_OPS_ASSERTION_CMD),
+], ids=["Dockerfile", "Singularity"])
+def test_carriage_return_on_disk_is_rejected(tmp_path, name, check):
+    """A `#\\r` before a check makes BuildKit and the shell read the whole
+    line as a comment. The recipe is read from disk, so the \\r must survive
+    reading for the character rule to see it."""
+    text = DOCKERFILE if name == "Dockerfile" else SINGULARITY
+    assert text.count(check) >= 1
+    path = tmp_path / name
+    path.write_bytes(text.replace(check, "#\r" + check, 1).encode("utf-8"))
+    got = _why_cannot_fail(_read_recipe(path), name, FUSED_OPS_ASSERTION_CMD)
+    assert got is not None and "U+000D" in got, got
+
+
+def test_dockerfile_continuation_allows_trailing_blanks():
+    """BuildKit continues a line whose final `\\` is followed only by spaces
+    or tabs, so `exit 0 && \\ ` joins the next line into the same RUN."""
+    assert _docker_instructions("RUN a \\ \t\nb\nRUN c\\  \nd\n") == ["RUN a b", "RUN cd"]
 
 
 def test_dockerfile_line_ending_in_two_backslashes_ends_the_instruction():
