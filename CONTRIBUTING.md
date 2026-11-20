@@ -129,12 +129,22 @@ avoids the fallback.
 
 ```bash
 pytest tests/                          # everything that can run here
+pip install pytest bashlex==0.18       # without fireants/torch: the build-file tests still need bashlex
 pytest -m "not requires_fireants" tests/   # without fireants/torch installed
 ```
 
 Markers (`pytest.ini`): `requires_fireants` needs `fireants` and `torch`
 importable and runs on CPU; `ci_incompatible` needs a full ANTs and template
 environment.
+
+`tests/test_build_files.py` parses the Singularity `%post` and the Dockerfile
+`RUN` instructions with bashlex (pinned in `requirements-test.txt`, tests
+only) to check that every `python3 -c` build check can fail the build. Its
+module docstring states the rule. A construct bashlex 0.18 cannot parse
+(`case`, `time`, `select`, `coproc`, arithmetic expansion such as
+`$((...))`) makes those tests fail rather than pass unchecked. Without
+bashlex installed, pytest stops at a collection error in that file; it is not
+skipped, so CI cannot pass without running it.
 
 GPU checks, run as Slurm jobs against a built image:
 

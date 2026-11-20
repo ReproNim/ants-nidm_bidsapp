@@ -1,0 +1,4 @@
+# The build-file tests reject a carriage return in either recipe, so keep
+# them LF-only in every checkout.
+Dockerfile text eol=lf
+Singularity text eol=lf

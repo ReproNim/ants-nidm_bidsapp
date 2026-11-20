@@ -32,7 +32,7 @@ jobs:
         # The converter's own argument parser checks the argv the app builds
         # (tests/test_run.py); it imports PyNIDM, pinned as in requirements.txt.
         pip install pynidm==5.0.0 -e src/ants_seg_to_nidm
-        pip install pytest pytest-cov
+        pip install pytest pytest-cov bashlex==0.18
     - name: Run tests
       run: |
         pytest --cov=src tests/
